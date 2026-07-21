@@ -135,3 +135,14 @@ def test_initial_migration_contains_required_schema_and_rls() -> None:
     assert "create function enforce_problem_tenant" in lowered
     assert "on conflict (grading_result_id) do update" in lowered
     assert "grant usage on schema public to soaring_voyage_app" in lowered
+
+
+def test_initial_migration_bootstraps_runtime_role_before_grants() -> None:
+    sql = (Path(__file__).parents[2] / "migrations" / "001_initial_schema.sql").read_text().lower()
+
+    role_guard = "select 1 from pg_roles where rolname = 'soaring_voyage_app'"
+    role_create = "create role soaring_voyage_app"
+    first_grant = "grant usage on schema public to soaring_voyage_app"
+    assert role_guard in sql
+    assert role_create in sql
+    assert sql.index(role_create) < sql.index(first_grant)

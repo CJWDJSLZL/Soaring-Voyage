@@ -3,6 +3,18 @@
 -- FORCE RLS so table ownership cannot accidentally bypass tenant isolation.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
+-- Docker initializes the LOGIN runtime role before migrations. CI and other
+-- managed PostgreSQL services may not run that init hook, so provide an
+-- idempotent least-privilege placeholder before the GRANT statements below.
+-- An existing LOGIN role (including its password) is intentionally untouched.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'soaring_voyage_app') THEN
+        CREATE ROLE soaring_voyage_app NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;
+    END IF;
+END
+$$;
+
 CREATE FUNCTION app_current_tenant() RETURNS uuid
 LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT NULLIF(current_setting('app.current_tenant_id', true), '')::uuid
