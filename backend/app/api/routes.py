@@ -4,8 +4,9 @@ import json
 import secrets
 import time
 from collections.abc import Iterable, Iterator
-from datetime import UTC, timedelta
-from typing import cast
+from copy import deepcopy
+from datetime import UTC, datetime, timedelta
+from typing import Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -83,6 +84,30 @@ def can_access_assignment(user: User, assignment: dict) -> bool:
     )
 
 
+def as_utc(value: str | datetime) -> datetime:
+    parsed = datetime.fromisoformat(value) if isinstance(value, str) else value
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def assignment_status(assignment: dict) -> str:
+    due_date = assignment.get("due_date")
+    return "expired" if due_date and as_utc(due_date) <= utcnow() else "active"
+
+
+def assignment_class_name(store: Repository, assignment: dict) -> str:
+    return "、".join(store.class_name(assignment["tenant_id"], class_id) for class_id in assignment["class_ids"])
+
+
+def can_access_submission(user: User, submission: dict) -> bool:
+    if user.tenant_id != submission["tenant_id"]:
+        return False
+    if user.role in {"admin", "sysadmin"}:
+        return True
+    if user.role == "student":
+        return submission["student_id"] == user.user_id
+    return user.role == "teacher" and bool(set(user.class_ids) & set(submission["class_ids"]))
+
+
 def validate_class_ids(store: Repository, user: User, class_ids: list[str]) -> None:
     if len(class_ids) != len(set(class_ids)):
         raise AppError(422, 4022, "请求参数校验失败", "class_ids must be unique")
@@ -111,13 +136,7 @@ def get_visible_submission(store: Repository, submission_id: str, user: User) ->
     submission = store.submissions.get(submission_id)
     if submission is None or submission["tenant_id"] != user.tenant_id:
         raise AppError(404, 4004, "提交记录不存在")
-    assignment = store.assignments[submission["assignment_id"]]
-    allowed = (
-        user.role in {"admin", "sysadmin"}
-        or (user.role == "student" and submission["student_id"] == user.user_id)
-        or (user.role == "teacher" and can_access_assignment(user, assignment))
-    )
-    if not allowed:
+    if not can_access_submission(user, submission):
         raise AppError(404, 4004, "提交记录不存在")
     return submission
 
@@ -290,7 +309,9 @@ def create_assignment(
     data = {
         "assignment_id": assignment_id,
         "title": payload.title,
-        "classes": [{"class_id": item, "class_name": item} for item in payload.class_ids],
+        "classes": [
+            {"class_id": item, "class_name": store.class_name(user.tenant_id, item)} for item in payload.class_ids
+        ],
         "due_date": payload.due_date.isoformat() if payload.due_date else None,
         "problem_count": len(payload.problem_ids),
         "created_at": created_at,
@@ -303,33 +324,49 @@ def create_assignment(
 def list_assignments(
     request: Request,
     class_id: str | None = None,
-    status: str = "all",
+    status: Literal["active", "expired", "all"] = "all",
+    order_by: Literal["created_at", "due_date"] | None = None,
+    order: Literal["asc", "desc"] | None = None,
     page_number: int = Query(1, alias="page", ge=1),
     page_size: int = Query(20, ge=1, le=100),
     user: User = Depends(current_user),
     store: Repository = Depends(get_store),
 ):
+    effective_order_by = order_by or ("due_date" if user.role == "student" else "created_at")
+    effective_order = order or ("asc" if user.role == "student" and order_by is None else "desc")
     items = []
     for assignment in store.assignments.values():
         if not can_access_assignment(user, assignment) or (class_id and class_id not in assignment["class_ids"]):
             continue
         due = assignment["due_date"]
-        expired = bool(due and __import__("datetime").datetime.fromisoformat(due) <= utcnow())
-        current_status = "expired" if expired else "active"
+        current_status = assignment_status(assignment)
         if status != "all" and current_status != status:
             continue
         mine = store.submission_for(user.user_id, assignment["assignment_id"]) if user.role == "student" else None
+        due_at = as_utc(due) if due else None
         item = {
             "assignment_id": assignment["assignment_id"],
             "title": assignment["title"],
+            "class_name": assignment_class_name(store, assignment),
             "due_date": due,
             "problem_count": len(assignment["problem_ids"]),
             "status": current_status,
+            "is_expiring_soon": bool(due_at and utcnow() < due_at <= utcnow() + timedelta(hours=1)),
             "created_at": assignment["created_at"],
         }
         if user.role == "student":
             item["submission_status"] = mine["status"] if mine else "not_submitted"
         items.append(item)
+    items.sort(
+        key=lambda item: (
+            as_utc(item[effective_order_by]) if item[effective_order_by] else datetime.max.replace(tzinfo=UTC)
+        ),
+        reverse=effective_order == "desc",
+    )
+    if effective_order_by == "due_date":
+        items = [item for item in items if item["due_date"] is not None] + [
+            item for item in items if item["due_date"] is None
+        ]
     return envelope(request, page(items, page_number, page_size))
 
 
@@ -353,8 +390,9 @@ def assignment_detail(
     data = {
         "assignment_id": assignment_id,
         "title": assignment["title"],
+        "class_name": assignment_class_name(store, assignment),
         "due_date": assignment["due_date"],
-        "status": assignment["status"],
+        "status": assignment_status(assignment),
         "problems": problems,
     }
     if user.role == "student":
@@ -374,6 +412,10 @@ def patch_assignment(
     assignment = get_assignment(store, assignment_id)
     if not can_access_assignment(user, assignment):
         raise AppError(404, 4004, "作业不存在")
+    if user.role == "teacher" and not set(assignment["class_ids"]).issubset(user.class_ids):
+        raise AppError(403, 4003, "教师只能修改完全属于本人班级的作业")
+    if assignment_status(assignment) == "expired":
+        raise AppError(409, 4005, "作业已截止，不可修改")
     if (
         len(payload.add_problem_ids) != len(set(payload.add_problem_ids))
         or len(payload.remove_problem_ids) != len(set(payload.remove_problem_ids))
@@ -392,7 +434,13 @@ def patch_assignment(
         raise AppError(422, 4022, "请求参数校验失败", "assignment must contain at least one problem")
     if len(resulting_ids) > 50:
         raise AppError(422, 4022, "请求参数校验失败", "assignment cannot contain more than 50 problems")
-    if payload.remove_problem_ids and any(s["assignment_id"] == assignment_id for s in store.submissions.values()):
+    answered_problem_ids = {
+        result["problem_id"]
+        for submission in store.submissions.values()
+        if submission["assignment_id"] == assignment_id
+        for result in submission["results"]
+    }
+    if set(payload.remove_problem_ids) & answered_problem_ids:
         raise AppError(409, 4005, "该题目已有学生提交，不可移除")
     if payload.title is not None:
         assignment["title"] = payload.title
@@ -432,6 +480,7 @@ def grade(problem: dict, raw_answer: str, hint_level: int = 0) -> dict:
         question_type=cast(QuestionType, type_map[problem["problem_type"]]),
         grade=problem["grade_level"],
         hint_level=hint_level,
+        solution_steps=problem.get("solution_steps", []),
     )
     deterministic = route_grade(grading_request)
     routed = route_grade(
@@ -451,9 +500,14 @@ def grade(problem: dict, raw_answer: str, hint_level: int = 0) -> dict:
         "confidence_score": routed.confidence,
         "feedback_text": "老师正在审核这道题。" if routed.needs_review else routed.feedback,
         "encouragement": "真棒！" if routed.is_correct else "继续努力，你可以的！",
-        "next_hint": None if routed.is_correct else routed.feedback,
+        "next_hint": None if routed.is_correct or routed.locked else routed.feedback,
         "error_type": None if routed.is_correct or routed.needs_review else ("未作答" if not answer else "计算错误"),
         "hint_level": hint_level,
+        "hint_state": routed.hint_state,
+        "locked": routed.locked,
+        "show_full_solution": routed.locked,
+        "solution_steps": problem.get("solution_steps", []) if routed.locked else [],
+        "knowledge_point_recorded": False,
         "attempt_number": hint_level + 1,
         "routed_to_human": routed.needs_review,
         "grading_source": "pending_human_review" if routed.needs_review else routed.source,
@@ -487,7 +541,7 @@ def add_pending_review(store: Repository, submission: dict, result: dict, user: 
         "submission_id": submission["submission_id"],
         "problem_id": result["problem_id"],
         "student_name": user.display_name,
-        "class_name": assignment["class_ids"][0],
+        "class_name": "、".join(store.class_name(user.tenant_id, class_id) for class_id in submission["class_ids"]),
         "assignment_title": assignment["title"],
         "problem_text": problem["problem_text"],
         "problem_type": problem["problem_type"],
@@ -512,7 +566,7 @@ def submit(
     assignment = get_assignment(store, payload.assignment_id)
     if not can_access_assignment(user, assignment):
         raise AppError(403, 4003, "该作业不属于你所在的班级")
-    if assignment["due_date"] and __import__("datetime").datetime.fromisoformat(assignment["due_date"]) <= utcnow():
+    if assignment["due_date"] and as_utc(assignment["due_date"]) <= utcnow():
         raise AppError(410, 4006, "作业已截止，无法提交")
     if store.submission_for(user.user_id, payload.assignment_id):
         raise AppError(409, 4005, "该作业已提交，不可重复提交")
@@ -544,6 +598,7 @@ def submit(
         "submission_id": submission_id,
         "tenant_id": user.tenant_id,
         "student_id": user.user_id,
+        "class_ids": sorted(set(user.class_ids) & set(assignment["class_ids"])),
         "assignment_id": payload.assignment_id,
         "status": status,
         "submitted_at": submitted_at,
@@ -558,6 +613,7 @@ def submit(
         },
     }
     store.submissions[submission_id] = submission
+    store.attempts[submission_id] = {result["problem_id"]: [deepcopy(result)] for result in results}
     store.events[submission_id] = [{"submission_id": submission_id, "status": status}]
     for result in results:
         if result["routed_to_human"]:
@@ -587,7 +643,7 @@ def list_submissions(
             or (assignment_id and submission["assignment_id"] != assignment_id)
         ):
             continue
-        if user.role == "teacher" and not can_access_assignment(user, store.assignments[submission["assignment_id"]]):
+        if user.role == "teacher" and not can_access_submission(user, submission):
             continue
         public = public_submission(submission)
         public.pop("results", None)
@@ -614,6 +670,9 @@ def hint(
     store: Repository = Depends(get_store),
 ):
     submission = get_visible_submission(store, submission_id, user)
+    assignment = store.assignments[submission["assignment_id"]]
+    if assignment["due_date"] and as_utc(assignment["due_date"]) <= utcnow():
+        raise AppError(410, 4006, "作业已截止，无法继续尝试")
     result = next((item for item in submission["results"] if item["problem_id"] == payload.problem_id), None)
     if result is None:
         raise AppError(403, 4003, "这道题不属于你的提交记录")
@@ -636,7 +695,25 @@ def hint(
     result.update(grade(problem, payload.new_answer.strip(), previous_hint_level + 1))
     result["hint_level"] = previous_hint_level + 1
     result["attempt_number"] = previous_attempt_number + 1
-    assignment = store.assignments[submission["assignment_id"]]
+    if result["show_full_solution"]:
+        record_id = ident()
+        record = {
+            "record_id": record_id,
+            "record_type": "error_history",
+            "tenant_id": user.tenant_id,
+            "student_id": user.user_id,
+            "submission_id": submission_id,
+            "assignment_id": submission["assignment_id"],
+            "problem_id": payload.problem_id,
+            "knowledge_points": list(problem.get("tags", [])),
+            "error_type": result["error_type"],
+            "student_answer": result["student_answer"],
+            "created_at": iso_now(),
+        }
+        store.knowledge_records[record_id] = record
+        result["knowledge_point_recorded"] = True
+        result["knowledge_point_record"] = record
+    store.attempts[submission_id][payload.problem_id].append(deepcopy(result))
     if result["routed_to_human"]:
         add_pending_review(store, submission, result, user, assignment)
     recompute_submission(submission)
@@ -660,10 +737,17 @@ def hint(
             "feedback_text",
             "encouragement",
             "next_hint",
+            "hint_state",
+            "locked",
+            "show_full_solution",
+            "solution_steps",
+            "knowledge_point_recorded",
             "routed_to_human",
             "confidence_score",
         )
     }
+    if "knowledge_point_record" in result:
+        data["knowledge_point_record"] = result["knowledge_point_record"]
     data["remaining_hints"] = 3 - result["hint_level"]
     return envelope(request, data)
 
@@ -672,24 +756,22 @@ def hint(
 def review_queue(
     request: Request,
     response: Response,
-    status: str = "pending",
+    status: Literal["pending", "reviewed", "all"] = "pending",
     page_number: int = Query(1, alias="page", ge=1),
     page_size: int = Query(20, ge=1, le=100),
     user: User = Depends(require_roles("teacher", "admin")),
     store: Repository = Depends(get_store),
 ):
-    reviews = []
+    visible_reviews = []
     for review in store.reviews.values():
         submission = store.submissions[review["submission_id"]]
-        assignment = store.assignments[submission["assignment_id"]]
         if review["tenant_id"] != user.tenant_id or (
-            user.role == "teacher" and not can_access_assignment(user, assignment)
+            user.role == "teacher" and not can_access_submission(user, submission)
         ):
             continue
-        if status != "all" and review["status"] != status:
-            continue
-        reviews.append(review)
-    response.headers["X-Pending-Review-Count"] = str(sum(r["status"] == "pending" for r in reviews))
+        visible_reviews.append(review)
+    reviews = [review for review in visible_reviews if status == "all" or review["status"] == status]
+    response.headers["X-Pending-Review-Count"] = str(sum(review["status"] == "pending" for review in visible_reviews))
     return envelope(request, page(reviews, page_number, page_size))
 
 
@@ -704,7 +786,7 @@ def review_detail(
     if not review or review["tenant_id"] != user.tenant_id:
         raise AppError(404, 4004, "审核记录不存在")
     submission = store.submissions[review["submission_id"]]
-    if user.role == "teacher" and not can_access_assignment(user, store.assignments[submission["assignment_id"]]):
+    if user.role == "teacher" and not can_access_submission(user, submission):
         raise AppError(404, 4004, "审核记录不存在")
     return envelope(request, review)
 
@@ -721,8 +803,7 @@ def review_override(
     if not review or review["status"] != "pending" or review["tenant_id"] != user.tenant_id:
         raise AppError(404, 4004, "待审核记录不存在")
     submission = store.submissions[review["submission_id"]]
-    assignment = store.assignments[submission["assignment_id"]]
-    if user.role == "teacher" and not can_access_assignment(user, assignment):
+    if user.role == "teacher" and not can_access_submission(user, submission):
         raise AppError(404, 4004, "待审核记录不存在")
     result = next(item for item in submission["results"] if item["problem_id"] == review["problem_id"])
     result.update(

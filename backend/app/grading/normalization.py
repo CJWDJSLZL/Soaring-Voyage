@@ -100,8 +100,12 @@ def normalize_answer(answer: object, question_type: str | None = None) -> str:
     while changed:
         changed = False
         for unit in _UNIT_WORDS:
-            if text.endswith(unit) and len(text) > len(unit):
-                text = text[: -len(unit)]
+            prefix = text[: -len(unit)] if text.endswith(unit) else ""
+            numeric_prefix = bool(prefix) and (
+                re.fullmatch(r"[0-9.+\-*/()^]+", prefix) is not None or _chinese_number(prefix) is not None
+            )
+            if prefix and numeric_prefix:
+                text = prefix
                 changed = True
                 break
 
@@ -117,6 +121,10 @@ def normalize_answer(answer: object, question_type: str | None = None) -> str:
     chinese = _chinese_number(text)
     if chinese is not None:
         text = chinese
+    elif question_type == "fill_blank" and any(ch.isalpha() for ch in text):
+        # Preserve textual fill-ins while dropping surrounding punctuation,
+        # emoji, and other symbols just as numeric normalization does.
+        return "".join(ch for ch in text.casefold() if ch.isalnum())
     text = text.replace("×", "*").replace("÷", "/").replace("−", "-")
     # Keep only the small arithmetic alphabet; this also removes emoji/punctuation.
     text = "".join(ch for ch in text if ch.isdigit() or ch in ".+-*/()^")
