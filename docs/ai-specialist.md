@@ -418,7 +418,7 @@ def init_qdrant_collection():
 ─────────────────────────────────────────────────────────
 定义：AI 判断的 is_correct 与 expected_correct 一致的比例
 计算：matched_cases / total_cases
-目标：MockLLM ≥ 94%，真实 LLM ≥ 90%
+目标：MockLLM ≥ 94%，真实 LLM 发布抽样 ≥ 94%
 
 解读建议：
   整体 > 94% 但某子集（如进位相关）< 88% →
@@ -1166,7 +1166,7 @@ Phase 2（下学期）：质量提升与扩展
   → 接入 PaddleOCR，支持手写作业拍照识别
   → RAG 题库扩充至 10,000+ 题，Embedding 评估优化（Precision@2 > 0.80）
   → 数据飞轮激活：HITL 覆盖 ≥ 500 条后，Prompt A/B 测试框架上线
-  → WebSocket 实时推送（替换 HITL 结果轮询）
+  → 持续优化 Phase 1 SSE 实时推送（重连、心跳与容量治理）；仅在出现双向通信需求时评估 WebSocket
   → 本地 bce-embedding 替代 OpenAI Embedding（完全本地化）
   → Token 成本进一步优化：高置信答对快速路径，节省 Feedback LLM 调用
 

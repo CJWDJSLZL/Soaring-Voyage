@@ -633,10 +633,10 @@ GET /api/v1/submissions/{submission_id}
 }
 ```
 
-**轮询建议**（前端低置信度结果刷新）：
-- `status = "partial_human_review"` 时，前端每 10 秒轮询一次
-- 检测到所有 `routed_to_human=false` 时停止轮询
-- 超过 24 小时未完成人工审核时，停止轮询并提示"请联系老师查看批改结果"
+**SSE 建议**（前端低置信度结果刷新）：
+- `status = "partial_human_review"` 时，前端订阅 `/submissions/{submission_id}/events`
+- 收到 `grading_update` 且所有 `routed_to_human=false` 时关闭连接
+- 连接断开时使用指数退避重连；页面长期挂起或浏览器不支持 SSE 时提供手动刷新兜底
 
 ---
 
@@ -1459,21 +1459,20 @@ GET /health
 
 ### 4.1 低置信度批改通知
 
-低置信度题目批改结果为 `pending`，前端通过**轮询**获取最新状态：
+低置信度题目批改结果为 `pending`，前端通过 **Server-Sent Events（SSE）** 获取最新状态：
 
 ```
-GET /api/v1/submissions/{submission_id}
-→ 每 10 秒轮询一次
-→ 当所有 results[i].routed_to_human=false 时停止轮询
-→ 超过 24 小时无变化时停止轮询并提示用户联系教师
-```
+GET /api/v1/submissions/{submission_id}/events
+Accept: text/event-stream
 
-**Phase 2 升级计划**：替换为 Server-Sent Events（SSE）：
-```
-GET /api/v1/submissions/{submission_id}/events  (text/event-stream)
 event: grading_update
-data: {"problem_id":"uuid","is_correct":false,"feedback_text":"..."}
+data: {"submission_id":"uuid","problem_id":"uuid","routed_to_human":false,"is_correct":false,"feedback_text":"..."}
+
+event: heartbeat
+data: {"timestamp":"2026-07-20T12:00:00Z"}
 ```
+
+客户端使用 `EventSource` 自动重连，服务端每 30 秒发送 heartbeat；鉴权采用同源 HttpOnly Cookie，或使用短期一次性 `sse_ticket`，避免把长期 JWT 放入 URL。WebSocket 不纳入 Phase 1。
 
 ### 4.2 批量操作异步模式
 
@@ -1488,24 +1487,11 @@ GET  /api/v1/ops/jobs/{job_id}    → { "status": "running|completed|failed", "p
 
 ---
 
-## 五、WebSocket 预研设计（Phase 2）
+## 五、SSE 连接管理与 WebSocket 评估边界
 
-以下为 Phase 2 的 WebSocket 接口设计草案，Phase 1 中不实现。
+Phase 1 统一使用 SSE。连接管理要求：每用户限制并发连接数、30 秒心跳、支持 `Last-Event-ID` 恢复、反向代理关闭响应缓冲。只有未来出现实时协作等双向通信需求时，才评估 WebSocket；以下草案不作为当前实现范围。
 
-```
-WebSocket: wss://<host>/api/v2/ws?token=<JWT>
-
-连接后客户端订阅事件：
-  {"action": "subscribe", "channel": "submission_updates", "submission_id": "uuid"}
-
-服务端推送事件格式：
-  {"event": "grading_complete", "problem_id": "uuid", "data": {"is_correct": false, ...}}
-  {"event": "hitl_review_done", "review_id": "uuid", "data": {"is_correct": false, ...}}
-  {"event": "weak_point_alert", "data": {"knowledge_point": "三位数加法进位", "student_id": "uuid"}}
-
-连接保活：每 30 秒 Ping/Pong
-重连策略：指数退避（1s, 2s, 4s, ...，最大 30s）
-```
+WebSocket 评估触发条件：需要客户端向服务器持续发送实时事件，或出现多人实时协作。普通批改完成、HITL 完成和角标变化均继续使用 SSE，不重复建设两套实时通道。
 
 ---
 
@@ -1523,6 +1509,7 @@ WebSocket: wss://<host>/api/v2/ws?token=<JWT>
 | POST /submissions/ | ✓（本班，未截止） | ✗ | ✗ | ✗ |
 | POST /submissions/{id}/hint | ✓（自己） | ✗ | ✗ | ✗ |
 | GET /submissions/ | ✓（自己） | ✓（本班） | ✓ | ✓ |
+| GET /submissions/{id}/events | ✓（自己，SSE） | ✓（本班） | ✓ | ✓ |
 | GET /teacher/human-review-queue | ✗ | ✓（本班） | ✓ | ✓ |
 | POST /teacher/human-review/{id} | ✗ | ✓（本班） | ✓ | ✗ |
 | GET /teacher/dashboard | ✗ | ✓（本班） | ✓（全校） | ✗ |

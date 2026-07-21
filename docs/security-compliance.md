@@ -308,19 +308,25 @@ class HumanReviewIn(BaseModel):
 ### 6.2 SQL 注入防护
 
 ```python
-# 全程使用 SQLAlchemy ORM + 参数绑定，严禁字符串拼接 SQL
+# 全程优先使用 asyncpg 原生参数化 SQL，严禁字符串拼接 SQL
 
-# ✓ 安全写法（ORM 自动参数化）
-stmt = select(GradingResult).where(
-    GradingResult.tenant_id == tenant_id,
-    GradingResult.submission_id == submission_id
+# ✓ 安全写法（asyncpg 使用 $1、$2 位置参数）
+result = await conn.fetchrow(
+    """
+    SELECT id, tenant_id, submission_id
+    FROM grading_results
+    WHERE tenant_id = $1 AND submission_id = $2
+    """,
+    tenant_id,
+    submission_id,
 )
-result = await session.execute(stmt)
 
-# ✓ 安全写法（textual SQL 必须使用 bindparam）
-from sqlalchemy import text
-stmt = text("SELECT id FROM users WHERE tenant_id = :tid AND username = :uname")
-result = await session.execute(stmt, {"tid": tenant_id, "uname": username})
+# ✓ 动态查询也必须维护参数列表和占位符编号，不得拼接参数值
+user = await conn.fetchrow(
+    "SELECT id FROM users WHERE tenant_id = $1 AND username = $2",
+    tenant_id,
+    username,
+)
 
 # ✗ 危险写法（绝对禁止）
 raw_sql = f"SELECT * FROM users WHERE username = '{username}'"  # SQL 注入风险！
@@ -819,7 +825,7 @@ done
 |-----------|------|---------|
 | A01 权限控制失效 | 越权访问他人数据 | 服务端行级 RBAC + tenant 隔离 |
 | A02 加密失效 | 密码明文存储 | bcrypt(rounds=12) |
-| A03 注入 | SQL 注入 | SQLAlchemy ORM 全程参数化 |
+| A03 注入 | SQL 注入 | asyncpg 原生 SQL 全程使用 `$n` 参数绑定 |
 | A03 注入 | LLM Prompt 注入 | 白名单过滤 + 明确数据/指令分离 |
 | A04 不安全设计 | 缺乏速率限制 | Redis 滑动窗口限流 |
 | A05 安全配置错误 | API Key 硬编码 | 环境变量 + gitignore + pre-commit hook |

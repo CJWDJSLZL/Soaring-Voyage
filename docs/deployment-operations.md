@@ -279,7 +279,7 @@ DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 QIANWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 
 # ── 数据库 ──────────────────────────────────────────────────────
-DATABASE_URL=postgresql+asyncpg://mathgrader:${DB_PASSWORD}@postgres:5432/mathgrader
+DATABASE_URL=postgresql://mathgrader:${DB_PASSWORD}@postgres:5432/mathgrader
 DB_PASSWORD=请修改为强密码_至少16位含字母数字特殊字符
 
 # ── Redis ───────────────────────────────────────────────────────
@@ -608,7 +608,7 @@ jq 'select(.grading_source=="rule_fallback")' /var/log/mathgrader/app.log | wc -
 | LLM 调用失败率 | 可靠性 | > 10% / 5分钟窗口 | 日志分析 |
 | 规则降级率 | 质量 | > 5% / 小时 | 日志分析 |
 | HITL 队列积压 | 业务 | > 50 条待处理 | DB 查询 |
-| 批改准确率（Harness） | 质量 | < 90%（每周检查） | Harness 报告 |
+| 批改准确率（Harness） | 质量 | < 94%（每周检查并阻断发布） | Harness 报告 |
 | CPU 使用率 | 资源 | > 85% 持续 5 分钟 | top/htop |
 | 内存使用率 | 资源 | > 90% | free -h |
 | 磁盘使用率 | 资源 | > 80% | df -h |
@@ -934,7 +934,7 @@ echo "恢复完成！RPO = 24小时（丢失最后一次备份后的数据）"
 发布前必须全部完成（逐一勾选）：
 ──────────────────────────────────────────────────────────────
 [ ] Harness MockLLM 通过（准确率 ≥ 94%）
-[ ] Harness 真实 LLM 20% 抽样通过（准确率 ≥ 90%，发布前 24h 内执行）
+[ ] Harness 真实 LLM 20% 抽样通过（准确率 ≥ 94%，发布前 24h 内执行）
 [ ] 单元测试全部通过（pytest tests/unit/）
 [ ] 集成测试全部通过（pytest tests/integration/）
 [ ] API 测试全部通过（pytest tests/api/）
@@ -1016,16 +1016,15 @@ echo "请分析根因后再次尝试升级"
 
 ```python
 # config/settings.py 关键参数
-db_pool_size     = 10    # 基础连接池大小（常驻连接数）
-db_max_overflow  = 20    # 峰值时可额外借出的连接数（总最大 30）
-db_pool_timeout  = 30    # 等待空闲连接的超时时间（秒）
-db_pool_recycle  = 3600  # 连接回收周期（秒），防空闲连接被 PostgreSQL 关闭
-db_pool_pre_ping = True  # 使用前 ping 检查连接是否还活着
+db_min_size = 5                         # asyncpg 常驻最小连接数
+db_max_size = 25                        # asyncpg 连接池最大连接数
+db_command_timeout = 30                 # 单条 SQL 超时（秒）
+db_max_inactive_connection_lifetime = 300  # 空闲连接回收周期（秒）
 
 # 说明：
 # 50 并发学生 × 5 个 LLM 节点 × 1个 DB 查询 = 250 个并发 DB 操作
 # 但实际上很多是 asyncio，不是每个都占一个连接
-# pool_size=10 + max_overflow=20 = 30 个连接，足够应对高峰
+# max_size=25 个连接；通过压测和 pg_stat_activity 再校准
 ```
 
 ### 8.2 LLM 并发控制

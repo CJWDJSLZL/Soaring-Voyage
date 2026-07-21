@@ -181,7 +181,7 @@ sequenceDiagram
     participant API as FastAPI
     participant HS as HumanReviewService
     participant DB as PostgreSQL
-    participant Student as 学生端（轮询）
+    participant Student as 学生端（SSE）
 
     note over Teacher: 教师打开审核队列
 
@@ -205,13 +205,12 @@ sequenceDiagram
     HS->>DB: 写入 audit_logs（操作审计）
     HS-->>API: 审核完成，student_notified=true
 
-    loop 学生端每10秒轮询（最多24小时）
-        Student->>API: GET /api/v1/submissions/{submission_id}
-        API->>DB: 查询 grading_results（含人工覆盖后的结论）
-        note over Student: 检测到 routed_to_human=false 时停止轮询
-        DB-->>API: 最终批改结果
-        API-->>Student: 展示最终批改结果（"老师已为你批改"）
-    end
+    Student->>API: GET /api/v1/submissions/{submission_id}/events
+    note over API,Student: 建立 text/event-stream；断线后按指数退避重连
+    API->>DB: 查询 grading_results（含人工覆盖后的结论）
+    DB-->>API: 最终批改结果
+    API-->>Student: event: grading_update（老师已完成审核）
+    Student-->>Student: 更新结果并关闭本次 SSE 连接
 ```
 
 ### 2.4 Hint 学习循环流程
@@ -717,7 +716,7 @@ TTL = 900  # 15 分钟
 
 # Redis 内存管理
 # maxmemory-policy: allkeys-lru（内存满时淘汰最久未访问的键）
-# 预计 Redis 常驻内存 < 512MB（Prompt 缓存 + 活跃用户信息）
+# 预计 Redis 常驻内存 < 512MB（限流、登录锁定、业务数据缓存；Prompt 静态前缀仅存进程内）
 ```
 
 #### 3.5.2 数据库查询缓存策略
@@ -966,7 +965,7 @@ services:
 | 阶段 | 必须满足 |
 |------|---------|
 | PR 合并前 | 单元测试通过 + 覆盖率 ≥ 80% + Harness MockLLM ≥ 94%（涉及相关文件变更时）|
-| 发布前 | Harness 真实 LLM 20% 抽样 ≥ 90% + API 测试 100% + UAT 全通过 |
+| 发布前 | Harness 真实 LLM 20% 抽样 ≥ 94% + API 测试 100% + UAT 全通过 |
 | 发布前 | bandit 无 HIGH 级安全漏洞 + pip audit 无已知 CVE |
 
 ---
@@ -982,6 +981,6 @@ services:
 | LLM 接口 | OpenAI 兼容格式 | 各厂商原生 SDK | DeepSeek/Qianwen 均支持 OpenAI Chat Completions 格式，代码无需改动即可切换模型 |
 | 向量数据库 | Qdrant | Chroma、Pinecone | Qdrant 支持私有化 Docker 部署，性能优于 Chroma，无 Pinecone 的数据出境问题 |
 | Token 缓存 | 服务端前缀缓存 | 客户端端缓存 | 服务端 KV Cache 对所有用户生效，12 个变体 warm-up 后每次请求节省 ~60% 成本 |
-| 实时通知 | 客户端轮询 | WebSocket / SSE | Phase 1 规模小（< 50 并发），轮询足够；WebSocket 引入有状态连接管理复杂度，Phase 2 升级 |
+| 实时通知 | Server-Sent Events（SSE） | 客户端轮询 / WebSocket | Phase 1 只需服务端单向推送批改状态；SSE 比 WebSocket 简单，并支持浏览器自动重连 |
 | 熔断实现 | 自研简单计数器 | circuit-breaker 库 | 功能需求简单（三态熔断），不引入外部依赖 |
 | 日志格式 | structlog JSON | 纯文本日志 | JSON 格式方便 `jq` 过滤查询，为未来接入 ELK 做准备 |

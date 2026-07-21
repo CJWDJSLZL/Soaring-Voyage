@@ -14,7 +14,7 @@
 
 | 目标 | 衡量标准 | 责任方 |
 |------|---------|--------|
-| 批改准确率达标 | MockLLM Harness ≥ 94%，真实 LLM ≥ 90% | 开发团队（CI 自动） |
+| 批改准确率达标 | MockLLM Harness ≥ 94%，真实 LLM 发布抽样 ≥ 94% | 开发团队（CI 自动） |
 | 核心业务零缺陷上线 | P0/P1 缺陷归零 | 开发 + QA |
 | 性能满足要求 | P95 批改响应 ≤ 3 秒，并发 50 用户无报错 | 开发团队 |
 | AI 行为可预期 | Prompt 变更必须通过 Harness 回归才能合并 | CI 自动（强制门禁） |
@@ -863,33 +863,30 @@ Action Items（根据报告自动生成）：
 # tests/conftest.py
 
 import pytest
+import asyncpg
 from httpx import AsyncClient
 from api.main import app
 
 @pytest.fixture(scope="session")
 async def async_db():
     """Session 级别测试数据库（整个测试运行共享）"""
-    engine = create_async_engine(
-        "postgresql+asyncpg://test:test@localhost:5433/mathgrader_test",
-        echo=False
+    pool = await asyncpg.create_pool(
+        "postgresql://test:test@localhost:5433/mathgrader_test",
+        min_size=1,
+        max_size=5,
     )
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield engine
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-    await engine.dispose()
+    # 测试库结构由 Alembic/SQL 迁移在测试启动前创建，不使用 ORM metadata。
+    yield pool
+    await pool.close()
 
 
 @pytest.fixture(autouse=True)
 async def clean_tables(async_db):
     """每个测试后清理数据（function 级别）"""
     yield
-    async with async_db.begin() as conn:
-        # 按外键依赖顺序清理
-        for table in reversed(Base.metadata.sorted_tables):
-            if table.name != 'alembic_version':
-                await conn.execute(table.delete())
+    async with async_db.acquire() as conn:
+        # 维护 TEST_TABLES 常量并按依赖关系使用 TRUNCATE ... CASCADE；表名不得来自用户输入。
+        await conn.execute(f"TRUNCATE TABLE {', '.join(TEST_TABLES)} RESTART IDENTITY CASCADE")
 
 
 @pytest.fixture(scope="session")
@@ -1200,7 +1197,7 @@ UAT-08   低置信度通知流程           通过/失败  ___分   ____________
 ### 9.1 CI 流水线设计
 
 ```yaml
-# .github/workflows/ci.yml（或等效 CI 系统配置）
+# .gitlab-ci.yml（项目统一使用 GitLab CI）
 
 stages:
   - lint
@@ -1254,7 +1251,7 @@ PR 合并前（必须全部通过）：
   ✓ bandit HIGH 级安全漏洞数量 = 0
 
 发布前（额外必须通过）：
-  ✓ Harness 真实 LLM 20% 抽样准确率 ≥ 90%
+  ✓ Harness 真实 LLM 20% 抽样准确率 ≥ 94%
   ✓ API 接口测试 100% 通过
   ✓ 性能测试：并发 50 用户 P95 ≤ 5s，错误率 < 1%
   ✓ UAT 所有场景通过（教师签字确认）

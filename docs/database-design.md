@@ -1089,7 +1089,8 @@ maintenance_work_mem = 1GB            # VACUUM/CREATE INDEX 内存
 # ── 连接 ─────────────────────────────────────────────────────
 max_connections = 100                 # 应用层用 asyncpg 连接池，DB 连接数不宜过多
 # asyncpg 连接池配置（在 app 端）：
-# pool_size=10, max_overflow=20, pool_timeout=30, pool_recycle=3600
+# min_size=5, max_size=25, command_timeout=30,
+# max_inactive_connection_lifetime=300
 
 # ── WAL 与可靠性 ─────────────────────────────────────────────
 wal_level = replica                   # 支持流复制（为将来高可用准备）
