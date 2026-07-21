@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from uuid import UUID
 
 _DEVELOPMENT_ENVS = {"test", "development"}
 _WEAK_SECRETS = {
@@ -34,12 +35,25 @@ class Settings:
     login_max_failures: int = 5
     login_lock_minutes: int = 15
     sse_ticket_ttl_seconds: int = 60
+    persistence_backend: str = field(default_factory=lambda: os.getenv("PERSISTENCE_BACKEND", "memory").strip().lower())
+    database_url: str | None = field(default_factory=lambda: os.getenv("DATABASE_URL") or None)
+    default_tenant_id: str | None = field(default_factory=lambda: os.getenv("DEFAULT_TENANT_ID") or None)
 
     def __post_init__(self) -> None:
         if not self.app_env:
             raise RuntimeError("APP_ENV must be explicitly set (test/development or a deployment environment)")
         if not self.api_prefix.startswith("/"):
             raise RuntimeError("API_PREFIX must start with '/'")
+        if self.persistence_backend not in {"memory", "postgres"}:
+            raise RuntimeError("PERSISTENCE_BACKEND must be 'memory' or 'postgres'")
+        if self.persistence_backend == "postgres":
+            if not self.database_url:
+                raise RuntimeError("DATABASE_URL is required when PERSISTENCE_BACKEND=postgres")
+            try:
+                normalized_tenant = str(UUID(self.default_tenant_id or ""))
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise RuntimeError("DEFAULT_TENANT_ID must be a valid UUID when PERSISTENCE_BACKEND=postgres") from exc
+            object.__setattr__(self, "default_tenant_id", normalized_tenant)
         if self.app_env not in _DEVELOPMENT_ENVS:
             if len(self.jwt_secret) < 32 or self.jwt_secret in _WEAK_SECRETS:
                 raise RuntimeError(

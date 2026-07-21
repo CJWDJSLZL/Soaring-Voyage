@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import datetime
+from typing import Any
+from uuid import uuid4
 
 from app.config import settings
 from app.core.errors import utcnow
@@ -69,3 +72,72 @@ class InMemoryRepository:
             ),
             None,
         )
+
+    async def identity_by_username(self, username: str) -> User | None:
+        return self.users.get(username)
+
+    async def identity_by_id(self, user_id: str, tenant_id: str, role: str) -> User | None:
+        user = self.user_by_id(user_id)
+        if user is None or user.tenant_id != tenant_id or user.role != role:
+            return None
+        return user
+
+    async def register_login_failure(self, user: User, *, max_failures: int, locked_until: datetime) -> User:
+        user.failed_logins += 1
+        if user.failed_logins >= max_failures:
+            user.locked_until = locked_until
+        return user
+
+    async def clear_login_failures(self, user: User) -> None:
+        user.failed_logins = 0
+        user.locked_until = None
+
+    async def replace_password(self, user: User, password_hash: bytes) -> None:
+        user.password_hash = password_hash
+        user.token_version += 1
+
+    async def increment_token_version(self, user: User) -> None:
+        user.token_version += 1
+
+    async def create_catalog_problem(self, user: User, problem: dict[str, Any]) -> str:
+        problem_id = str(uuid4())
+        self.problems[problem_id] = {
+            "problem_id": problem_id,
+            "tenant_id": user.tenant_id,
+            "created_by": user.user_id,
+            **problem,
+            "created_at": utcnow().isoformat(),
+        }
+        return problem_id
+
+    async def list_catalog_problems(
+        self,
+        user: User,
+        *,
+        grade_level: int | None,
+        problem_type: str | None,
+        difficulty: str | None,
+        keyword: str | None,
+        page_number: int,
+        page_size: int,
+    ) -> JsonDict:
+        items = [item for item in self.problems.values() if item.get("tenant_id") == user.tenant_id]
+        if grade_level is not None:
+            items = [item for item in items if item["grade_level"] == grade_level]
+        if problem_type is not None:
+            items = [item for item in items if item["problem_type"] == problem_type]
+        if difficulty is not None:
+            items = [item for item in items if item["difficulty"] == difficulty]
+        if keyword is not None:
+            lowered = keyword.lower()
+            items = [item for item in items if lowered in str(item["problem_text"]).lower()]
+        items.sort(key=lambda item: (str(item.get("created_at", "")), str(item["problem_id"])), reverse=True)
+        total = len(items)
+        start = (page_number - 1) * page_size
+        return {
+            "items": items[start : start + page_size],
+            "total": total,
+            "page": page_number,
+            "page_size": page_size,
+            "has_next": start + page_size < total,
+        }

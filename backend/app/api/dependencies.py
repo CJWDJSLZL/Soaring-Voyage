@@ -9,7 +9,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.core.errors import AppError
 from app.core.security import decode_access_token
 from app.domain.models import User
-from app.domain.repository import Repository
+from app.domain.repository import IdentityProblemRepository, Repository
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -18,17 +18,24 @@ def get_store(request: Request) -> Repository:
     return request.app.state.store
 
 
-def current_user(
+def get_identity_repository(request: Request) -> IdentityProblemRepository:
+    return request.app.state.identity_repository
+
+
+async def current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
-    store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ) -> User:
     if credentials is None:
         raise AppError(401, 4002, "未登录")
     try:
-        claims = decode_access_token(credentials.credentials)
+        claims = decode_access_token(credentials.credentials, request.app.state.settings)
     except jwt.PyJWTError as exc:
         raise AppError(401, 4001, "Token 无效或过期") from exc
-    user = store.user_by_id(claims.get("user_id", ""))
+    user = await repository.identity_by_id(
+        claims.get("user_id", ""), claims.get("tenant_id", ""), claims.get("role", "")
+    )
     if (
         user is None
         or user.tenant_id != claims.get("tenant_id")
