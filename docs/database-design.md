@@ -3,8 +3,9 @@
 **项目名称**：翱翔启航  
 **文档版本**：v2.0  
 **创建日期**：2026-07-19  
-**最后更新**：2026-07-20  
-**状态**：待确认
+**最后更新**：2026-07-21
+**状态**：已确认
+**架构基线**：v1.0
 
 ---
 
@@ -342,7 +343,7 @@ CREATE TABLE submissions (
     assignment_id   UUID        NOT NULL REFERENCES assignments(id),
     student_id      UUID        NOT NULL REFERENCES users(id),
     status          VARCHAR(30) NOT NULL DEFAULT 'pending'
-                    CHECK (status IN ('pending','graded','partial_human_review','human_review')),
+                    CHECK (status IN ('pending','grading','graded','partial_human_review','reviewed')),
     submitted_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -404,7 +405,7 @@ CREATE TABLE grading_results (
     confidence_score    FLOAT       NOT NULL DEFAULT 0.0
                         CHECK (confidence_score BETWEEN 0 AND 1),
     error_type          VARCHAR(30)
-                        CHECK (error_type IN ('计算错误','审题错误','进位错误','概念错误','无错误')),
+                        CHECK (error_type IN ('计算错误','审题错误','进位错误','概念错误','未作答','无错误')),
     error_detail        TEXT,
 
     -- 面向学生的反馈
@@ -604,6 +605,8 @@ CREATE TRIGGER grading_results_error_history
 ```sql
 CREATE TABLE harness_runs (
     id                  UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    status              VARCHAR(20) NOT NULL DEFAULT 'queued'
+                        CHECK (status IN ('queued','running','completed','failed')),
     triggered_by        VARCHAR(50) NOT NULL DEFAULT 'manual'
                         CHECK (triggered_by IN ('ci','manual','scheduled')),
     prompt_version      VARCHAR(100),   -- Git commit hash of prompts/
@@ -758,9 +761,10 @@ CREATE INDEX ON mv_student_weak_points(tenant_id, student_id);
 ### 5.1 行级隔离实现（Python）
 
 ```python
+import asyncpg
 from contextvars import ContextVar
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
 
 _tenant_ctx: ContextVar[str] = ContextVar('tenant_id')
 
@@ -773,28 +777,35 @@ def get_tenant_id() -> str:
 
 class TenantSession:
     """
-    包装 AsyncSession，所有查询自动注入 tenant_id 过滤条件。
-    防止开发者忘记添加 tenant_id 导致跨租户数据泄漏。
+    基于 asyncpg 的租户事务边界。进入事务后用 SET LOCAL 设置 RLS 上下文，
+    所有 Repository SQL 仍须显式包含 tenant_id，形成应用层过滤 + RLS 双保险。
     """
-    def __init__(self, session: AsyncSession):
-        self._session = session
+    def __init__(self, pool: asyncpg.Pool):
+        self._pool = pool
 
-    async def get(self, model, id: str):
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[asyncpg.Connection]:
         tenant_id = get_tenant_id()
-        result = await self._session.execute(
-            select(model).where(
-                model.id == id,
-                model.tenant_id == tenant_id
-            )
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                # set_config(..., true) 等价于事务级 SET LOCAL，参数安全且事务结束自动清除。
+                await conn.execute(
+                    "SELECT set_config('app.current_tenant_id', $1, true)",
+                    tenant_id,
+                )
+                yield conn
+
+
+async def get_submission(session: TenantSession, submission_id: str):
+    async with session.transaction() as conn:
+        return await conn.fetchrow(
+            """
+            SELECT id, status, submitted_at
+            FROM submissions
+            WHERE tenant_id = $1 AND id = $2
+            """,
+            get_tenant_id(), submission_id,
         )
-        return result.scalar_one_or_none()
-
-    async def query(self, stmt):
-        tenant_id = get_tenant_id()
-        # 自动附加 WHERE tenant_id = :tid（假设 Model 有 tenant_id 字段）
-        if hasattr(stmt.froms[0].entity_zero.class_, 'tenant_id'):
-            stmt = stmt.where(stmt.froms[0].entity_zero.class_.tenant_id == tenant_id)
-        return await self._session.execute(stmt)
 ```
 
 ### 5.2 各表 tenant_id 说明

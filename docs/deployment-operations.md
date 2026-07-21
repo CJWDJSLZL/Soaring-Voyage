@@ -3,8 +3,9 @@
 **项目名称**：翱翔启航  
 **文档版本**：v2.0  
 **创建日期**：2026-07-19  
-**最后更新**：2026-07-20  
-**状态**：待确认
+**最后更新**：2026-07-21
+**状态**：已确认
+**架构基线**：v1.0
 
 ---
 
@@ -85,10 +86,16 @@ docker compose version             # 验证：输出 Docker Compose version v2.x
 sudo apt install nginx -y
 nginx -v                           # 验证：输出 nginx/1.24.x
 
-# ── 第五步：安装运维工具 ───────────────────────────────────────
+# ── 第五步：安装 Node.js 20（前端生产构建）─────────────────────
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+node --version                       # 验证：v20.x
+npm --version
+
+# ── 第六步：安装运维工具 ───────────────────────────────────────
 sudo apt install -y htop iotop nethogs curl wget git vim jq logrotate
 
-# ── 第六步：验证所有依赖 ───────────────────────────────────────
+# ── 第七步：验证所有依赖 ───────────────────────────────────────
 echo "Docker:  $(docker --version)"
 echo "Compose: $(docker compose version)"
 echo "Nginx:   $(nginx -v 2>&1)"
@@ -233,8 +240,10 @@ services:
       --requirepass ${REDIS_PASSWORD}
       --maxmemory 512mb
       --maxmemory-policy allkeys-lru
-      --bind 127.0.0.1
+      --bind 0.0.0.0
       --protected-mode yes
+      --appendonly yes
+      --appendfsync everysec
       --rename-command FLUSHALL ""
       --rename-command FLUSHDB ""
       --rename-command CONFIG ""
@@ -275,8 +284,8 @@ vim .env
 **完整 `.env` 配置**：
 ```ini
 # ── LLM API Keys ────────────────────────────────────────────────
-DEEPSEEK_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-QIANWEN_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+DEEPSEEK_API_KEY=<your-deepseek-api-key>
+QIANWEN_API_KEY=<your-qianwen-api-key>
 
 # ── 数据库 ──────────────────────────────────────────────────────
 DATABASE_URL=postgresql://mathgrader:${DB_PASSWORD}@postgres:5432/mathgrader
@@ -302,9 +311,10 @@ MAX_LLM_RETRIES=3
 LLM_TIMEOUT_SECONDS=30
 
 # ── 连接池 ──────────────────────────────────────────────────────
-DB_POOL_SIZE=10
-DB_MAX_OVERFLOW=20
-DB_POOL_RECYCLE=3600
+DB_MIN_SIZE=5
+DB_MAX_SIZE=25
+DB_MAX_INACTIVE_LIFETIME=300
+DB_COMMAND_TIMEOUT=30
 ```
 
 ```bash
@@ -385,6 +395,21 @@ server {
         proxy_hide_header Server;
     }
 
+    # SSE：关闭代理缓冲并保持长连接；应用每 30 秒发送 heartbeat
+    location ~ ^/api/v1/submissions/[^/]+/events$ {
+        proxy_pass         http://127.0.0.1:8000;
+        proxy_http_version 1.1;
+        proxy_set_header   Host $host;
+        proxy_set_header   X-Real-IP $remote_addr;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_buffering    off;
+        proxy_cache        off;
+        proxy_read_timeout 1h;
+        add_header X-Accel-Buffering no;
+        access_log off;  # 避免一次性 sse_ticket 进入访问日志
+    }
+
     # 健康检查（运维监控用，不记录访问日志）
     location /health {
         proxy_pass http://127.0.0.1:8000/health;
@@ -419,7 +444,14 @@ sudo systemctl enable nginx
 ```bash
 cd /opt/math-grader
 
-# 构建并启动所有服务（第一次约 5-10 分钟，需下载 Docker 镜像）
+# 构建前端静态资源并验证产物
+cd frontend
+npm ci
+npm run build
+test -f dist/index.html
+cd ..
+
+# 构建并启动后端和基础服务（第一次约 5-10 分钟，需下载 Docker 镜像）
 docker compose up -d --build
 
 # 查看启动状态（等待所有服务 healthy）
@@ -481,10 +513,10 @@ echo "Token 获取成功：${TOKEN:0:20}..."
 
 # 测试 3: 全校统计（验证数据库查询）
 curl -sk https://localhost/api/v1/admin/stats/overview \
-  -H "Authorization: Bearer $TOKEN" | jq .
+  -H "Authorization: Bearer ${TOKEN}" | jq .
 
 # 测试 4: 运行 Harness（MockLLM 模式，验证 AI 管道）
-docker compose exec app python3 scripts/run_harness_ci.py --mock --fail-below 0.94
+docker compose exec app python3 scripts/run_harness_ci.py --mock --min-cases 180 --fail-below 0.94
 # 期望：Harness PASSED，准确率 ≥ 94%
 
 # 测试 5: 验证日志输出正常
@@ -604,7 +636,8 @@ jq 'select(.grading_source=="rule_fallback")' /var/log/mathgrader/app.log | wc -
 | 指标 | 类型 | 告警阈值 | 告警方式 |
 |------|------|---------|---------|
 | 服务健康检查 | 可用性 | /health 连续 2 次失败 | 监控脚本 + 日志 |
-| 批改响应时间 P95 | 性能 | > 5 秒 | 日志分析 |
+| 批改响应时间 P95 Warning | 性能 | > 3 秒 | 日志分析 |
+| 批改响应时间 P95 Critical | 性能 | > 5 秒 | 日志分析 |
 | LLM 调用失败率 | 可靠性 | > 10% / 5分钟窗口 | 日志分析 |
 | 规则降级率 | 质量 | > 5% / 小时 | 日志分析 |
 | HITL 队列积压 | 业务 | > 50 条待处理 | DB 查询 |
@@ -959,7 +992,8 @@ cd /opt/math-grader
 
 # 拉取新代码
 git fetch origin
-git checkout <新版本 tag 或 commit hash>
+TARGET_REV="v1.1.0"  # 替换为待发布的 tag 或 commit hash
+git checkout "$TARGET_REV"
 
 # 检查是否有新的环境变量（对比 .env.example）
 diff .env .env.example | grep "^>"    # 查看新增的配置项
@@ -991,7 +1025,8 @@ echo "当前有问题的版本：$CURRENT"
 
 # 步骤 2：回滚代码
 git log --oneline -5    # 查看最近几次提交，确认回滚目标
-git checkout <上一个正常版本 tag 或 hash>
+PREVIOUS_REV="v1.0.0"  # 替换为上一个正常版本的 tag 或 commit hash
+git checkout "$PREVIOUS_REV"
 
 # 步骤 3：回滚数据库迁移（若本次升级有新迁移）
 docker compose exec app alembic downgrade -1
@@ -1169,7 +1204,7 @@ echo "=== 巡检完成 ==="
 ```
 每周维护任务：
 [ ] 验证最新备份可恢复（bash scripts/verify_backup.sh）
-[ ] 运行 Harness MockLLM（python3 scripts/run_harness_ci.py --mock）确认准确率 ≥ 94%
+[ ] 运行 Harness MockLLM（python3 scripts/run_harness_ci.py --mock --min-cases 180 --fail-below 0.94）确认固定180条且准确率 ≥ 94%
 [ ] 检查 LLM API 余额（登录 DeepSeek/Qianwen 控制台查看）
 [ ] 检查依赖漏洞（docker compose exec app pip audit）
 [ ] 查看系统补丁（sudo apt list --upgradable 2>/dev/null | wc -l）

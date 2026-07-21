@@ -3,8 +3,9 @@
 **项目名称**：翱翔启航  
 **文档版本**：v2.0  
 **创建日期**：2026-07-19  
-**最后更新**：2026-07-19  
-**状态**：待确认
+**最后更新**：2026-07-21
+**状态**：已确认
+**架构基线**：v1.0
 
 ---
 
@@ -158,11 +159,11 @@ sequenceDiagram
             LG->>LLM: feedback_generator_node（年龄适配反馈）
             LLM-->>LG: feedback_text + encouragement + next_hint
             LG-->>GS: 完整批改状态（final_is_correct + 反馈）
-            GS->>DB: 写入 grading_results（status=graded）
+            GS->>DB: 写入 grading_results（source=agent, routed_to_human=false）
             GS->>DB: 若答错：写入 student_error_history
         else 置信度 < 0.85
             LG-->>GS: 低置信状态
-            GS->>DB: 写入 grading_results（status=human_review）
+            GS->>DB: 写入 grading_results（source=pending_human_review, routed_to_human=true, is_correct=NULL）
             GS->>DB: 写入 human_review_queue（status=pending）
         end
     end
@@ -200,13 +201,17 @@ sequenceDiagram
     API->>HS: submit_review(review_id, override, reviewer)
     HS->>DB: 更新 human_review_queue.status = reviewed
     HS->>DB: 更新 grading_results.is_correct（最终结论）
+    HS->>DB: 更新 grading_results.routed_to_human = false
+    HS->>DB: 若该提交已无待审核题，更新 submissions.status = reviewed
     HS->>DB: 更新 grading_results.source = human_override
     HS->>DB: 若答错：写入 student_error_history（使用覆盖后的 error_type）
     HS->>DB: 写入 audit_logs（操作审计）
     HS-->>API: 审核完成，student_notified=true
 
-    Student->>API: GET /api/v1/submissions/{submission_id}/events
-    note over API,Student: 建立 text/event-stream；断线后按指数退避重连
+    Student->>API: POST /api/v1/auth/sse-ticket（Bearer JWT + submission_id）
+    API-->>Student: 一次性 sse_ticket（TTL=60s）
+    Student->>API: GET /api/v1/submissions/{submission_id}/events?sse_ticket=...
+    note over API,Student: GETDEL消费票据并恢复租户身份；建立text/event-stream；断线后重新申请票据
     API->>DB: 查询 grading_results（含人工覆盖后的结论）
     DB-->>API: 最终批改结果
     API-->>Student: event: grading_update（老师已完成审核）
@@ -563,16 +568,15 @@ graph LR
 
 **数据集结构**：
 ```
-Phase 1 用例分布（160+ 条）：
-  基础用例：3年级 × 2题型 × 3难度 × 5条 = 90条
-  选择题：3年级 × 3难度 × 5条 = 15条
+Phase 1 固定基线用例分布（180 条）：
+  基础用例：3年级 × 3题型 × 3难度 × 5条 = 135条
   边界用例：
     中文数字答案（"三百七十二"）  = 10条
     带单位答案（"5元"）           = 10条
     等价写法（"1/2" vs "0.5"）   = 10条
     空白/无效答案                 = 5条
-    进位/借位专项                 = 20条
-  共计：160条（满足 AC 3.10.1 要求）
+    进位/借位专项                 = 10条
+  共计：180条；少于180条时 CI 直接失败
 ```
 
 #### 3.3.4 Loop 工程

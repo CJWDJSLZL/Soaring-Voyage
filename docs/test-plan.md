@@ -3,8 +3,9 @@
 **项目名称**：翱翔启航  
 **文档版本**：v2.0  
 **创建日期**：2026-07-19  
-**最后更新**：2026-07-20  
-**状态**：待确认
+**最后更新**：2026-07-21
+**状态**：已确认
+**架构基线**：v1.0
 
 ---
 
@@ -37,7 +38,7 @@
                 └─────────┬──────────┘
               ┌────────────┴───────────┐
               │   Harness 批改质量测试  │  ← MockLLM 准确率回归（核心）
-              │   (160+ 标注用例)      │
+              │   (固定180条标注用例)   │
               └────────────┬───────────┘
             ┌───────────────┴────────────┐
             │        集成测试             │  ← LangGraph Agent 图端到端
@@ -782,7 +783,7 @@ async def test_forged_jwt_role_rejected(client):
 
 **用例文件格式**（`harness/dataset/grade3_arithmetic_medium.jsonl`）：
 
-```json
+```jsonl
 {"id":"G3-ARITH-CARRY-001","problem_type":"arithmetic","grade_level":3,"difficulty":"medium","curriculum_version":"人教版","problem_text":"325 + 47 = ___","student_answer":"362","reference_answer":"372","expected_correct":false,"expected_error_type":"进位错误","expected_confidence_min":0.85,"feedback_must_contain":["进位"],"feedback_must_not_contain":["错了！","蠢","答案是372"],"tags":["三位数加法","进位"]}
 {"id":"G3-ARITH-CARRY-002","problem_type":"arithmetic","grade_level":3,"difficulty":"medium","problem_text":"325 + 47 = ___","student_answer":"372","reference_answer":"372","expected_correct":true,"expected_error_type":null,"expected_confidence_min":0.90,"feedback_must_contain":["对","棒"],"feedback_must_not_contain":["错"],"tags":["三位数加法"]}
 ```
@@ -804,22 +805,24 @@ async def test_forged_jwt_role_rejected(client):
                 easy   medium   hard
 Grade 1 算术     5       5       5  = 15
 Grade 1 填空     5       5       5  = 15
+Grade 1 选择     5       5       5  = 15
 Grade 2 算术     5       5       5  = 15
 Grade 2 填空     5       5       5  = 15
+Grade 2 选择     5       5       5  = 15
 Grade 3 算术     5       5       5  = 15
 Grade 3 填空     5       5       5  = 15
 Grade 3 选择     5       5       5  = 15
 ──────────────────────────────────────────
-小计基础：105 条
+小计基础：135 条
 
 特殊用例：
   中文数字答案（"三百七十二"）    = 10
   带单位答案（"5元"、"3米"）      = 10
   等价写法（"1/2"="0.5"="50%"）  = 10
   空白/仅空格答案                  = 5
-  进位/借位专项                   = 20
+  进位/借位专项                   = 10
 ──────────────────────────────────────────
-Phase 1 总计：160 条（满足 requirement 3.10.1）
+Phase 1 总计：180 条；少于 180 条时 CI 直接失败
 ```
 
 ### 5.3 Harness 报告解读规范
@@ -827,17 +830,17 @@ Phase 1 总计：160 条（满足 requirement 3.10.1）
 ```
 Harness Report（示例输出）
 ────────────────────────────────────────
-总用例：  160
-通过：    154 ✓ PASS
-准确率：  96.25%  ✓ (≥ 94%)
+总用例：  180
+通过：    170 ✓ PASS
+准确率：  94.44%  ✓ (≥ 94%)
 
 分项指标：
-  误判率 (FPR)：      1.5%   (正确答案判为错误)
-  漏判率 (FNR)：      2.1%   (错误答案判为正确)
-  错误分类准确率：    85.0%  ✓ (≥ 80%)
+  假阳性率 (FPR)：    3.0%   (100条错误答案中3条判为正确)
+  假阴性率 (FNR)：    2.5%   (80条正确答案中2条判为错误)
+  错误分类准确率：    95.0%  ✓ (≥ 80%)
   置信度校准误差：    0.031  ✓ (< 0.05)
 
-失败用例：6 条
+失败用例：10 条（以下展示其中3条）
   G2-ARITH-CARRY-003: 进位错误被分类为计算错误（Classifier Prompt 需优化）
   G1-FILL-EASY-007:   "二十" 未被正确规范化（MathNormalizer 缺少该模式）
   G3-CHOICE-MED-002:  LLM 误判选择题，置信度 0.74（接近阈值，进入 HITL）
@@ -975,7 +978,7 @@ class TestSubmissionAPI:
         assert resp.status_code == 410
         assert resp.json()["code"] == 4006
 
-    async def test_empty_answer_text_rejected(self, client, student_token, seeded_assignment):
+    async def test_blank_answer_is_accepted_and_marked_wrong(self, client, student_token, seeded_assignment):
         resp = await client.post(
             "/api/v1/submissions/",
             json={
@@ -984,7 +987,11 @@ class TestSubmissionAPI:
             },
             headers={"Authorization": f"Bearer {student_token}"}
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 201
+        result = resp.json()["data"]["results"][0]
+        assert result["is_correct"] is False
+        assert result["error_type"] == "未作答"
+        assert result["routed_to_human"] is False
 
     async def test_xss_in_answer_stored_safely(self, client, student_token, seeded_assignment):
         xss_payload = '<script>alert("XSS")</script>'
@@ -1143,7 +1150,7 @@ locust -f tests/performance/locustfile.py \
 | 场景 | 并发用户 | P50 目标 | P95 目标 | 错误率目标 |
 |------|---------|---------|---------|-----------|
 | 正常负载 | 20 | ≤ 1.5s | ≤ 3s | 0% |
-| 峰值负载（放学高峰） | 50 | ≤ 2s | ≤ 5s | < 1% |
+| 峰值负载（放学高峰） | 50 | ≤ 2s | ≤ 3s | < 1% |
 | 压力测试（超负载） | 100 | — | — | < 5% |
 | 健康检查接口 | 任意 | ≤ 50ms | ≤ 100ms | 0% |
 
@@ -1204,40 +1211,74 @@ stages:
   - unit-test
   - integration-test
   - harness
-  - security
   - docker-build
+  - security
 
 lint:
+  stage: lint
   script:
     - ruff check . --select E,W,F
     - ruff format --check .
     - mypy agents/ context/ api/ --ignore-missing-imports
 
 unit-test:
+  stage: unit-test
   script: pytest tests/unit/ -v --cov=. --cov-report=xml --cov-fail-under=80
-  artifacts: coverage.xml
+  artifacts:
+    paths:
+      - coverage.xml
 
 integration-test:
+  stage: integration-test
   services:
     - postgres:16
     - redis:7
   script: pytest tests/integration/ -v --timeout=60
-  only_when: changed_files matches 'agents/**|context/**|api/**'
+  rules:
+    - changes:
+        - agents/**/*
+        - context/**/*
+        - api/**/*
 
 harness:
-  script: python3 scripts/run_harness_ci.py --mock --fail-below 0.94
-  only_when: changed_files matches 'prompts/**|agents/nodes/**|agents/tools/**'
+  stage: harness
+  script: python3 scripts/run_harness_ci.py --mock --fail-below 0.94 --min-cases 180
+  rules:
+    - changes:
+        - prompts/**/*
+        - agents/nodes/**/*
+        - agents/tools/**/*
+        - harness/cases/**/*
   # 此阶段失败会阻断 PR 合并
 
-security:
-  script:
-    - bandit -r . -x tests/ --severity-level high  # 高危漏洞必须为0
-    - pip audit --require-hashes || true           # 显示警告，不阻断
-    - trivy image mathgrader-app:latest --severity HIGH,CRITICAL
-
 docker-build:
-  script: docker build -t mathgrader-app:$CI_COMMIT_SHORT_SHA .
-  only_when: branch == main or tag
+  stage: docker-build
+  image: docker:27
+  services:
+    - docker:27-dind
+  script:
+    - docker build -t mathgrader-app:$CI_COMMIT_SHORT_SHA .
+    - docker save mathgrader-app:$CI_COMMIT_SHORT_SHA -o mathgrader-image.tar
+  artifacts:
+    paths: [mathgrader-image.tar]
+    expire_in: 1 day
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_TAG'
+
+security-code:
+  stage: security
+  script:
+    - bandit -r . -x tests/ --severity-level high
+    - pip audit --require-hashes
+
+container-scan:
+  stage: security
+  image: aquasec/trivy:latest
+  needs: [docker-build]
+  script:
+    - trivy image --input mathgrader-image.tar --exit-code 1 --severity HIGH,CRITICAL
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_TAG'
 ```
 
 ### 9.2 质量门禁汇总
@@ -1253,7 +1294,7 @@ PR 合并前（必须全部通过）：
 发布前（额外必须通过）：
   ✓ Harness 真实 LLM 20% 抽样准确率 ≥ 94%
   ✓ API 接口测试 100% 通过
-  ✓ 性能测试：并发 50 用户 P95 ≤ 5s，错误率 < 1%
+  ✓ 性能测试：并发 50 用户 P95 ≤ 3s，错误率 < 1%
   ✓ UAT 所有场景通过（教师签字确认）
   ✓ 发布前检查清单全部勾选
 ```

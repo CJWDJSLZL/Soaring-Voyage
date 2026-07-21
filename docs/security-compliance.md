@@ -3,8 +3,9 @@
 **项目名称**：翱翔启航  
 **文档版本**：v2.0  
 **创建日期**：2026-07-19  
-**最后更新**：2026-07-20  
-**状态**：待确认
+**最后更新**：2026-07-21
+**状态**：已确认
+**架构基线**：v1.0
 
 ---
 
@@ -144,6 +145,16 @@
 Phase 1 不实现 refresh_token（接受 24h 内旧 Token 可用）
 Phase 2 计划：Redis Token 黑名单实现服务端吊销
 ```
+
+#### 4.1.1 SSE 一次性票据安全策略
+
+浏览器原生 `EventSource` 不能设置 `Authorization` 请求头，因此 Phase 1 统一采用短期一次性 `sse_ticket`，不使用长期 JWT 查询参数：
+
+1. 客户端先携带 Bearer JWT 调用 `POST /api/v1/auth/sse-ticket`，并提交目标 `submission_id`。
+2. 服务端生成至少 128 bit 随机票据，Redis TTL 为 60 秒，绑定 `tenant_id`、`user_id`、角色和 `submission_id`。
+3. SSE 建连时使用原子 `GETDEL` 消费票据，再执行 RLS 和资源归属校验；失败统一返回 401/403。
+4. 票据禁止写入应用、Nginx、审计和分析日志；Nginx 对 SSE URL 关闭 access log 或对查询参数脱敏。
+5. 连接断开后客户端必须重新申请票据；限制每用户并发 SSE 连接数，防止资源耗尽。
 
 ### 4.2 密码安全策略
 

@@ -3,7 +3,9 @@
 **项目名称**：翱翔启航 AI 小学数学批改平台  
 **文档版本**：v1.0  
 **创建日期**：2026-07-20  
+**最后更新**：2026-07-21
 **状态**：已确认  
+**架构基线**：v1.0
 **适用对象**：开发团队（2.5 人：1 后端 + 1 前端 + 0.5 AI 工程师）
 
 ---
@@ -43,7 +45,7 @@ aoxiang/                                    ← 项目根目录
 │   │   ├── api/
 │   │   │   └── v1/
 │   │   │       ├── router.py               ← 总路由注册（prefix=/api/v1）
-│   │   │       ├── auth.py                 ← 登录/刷新 Token/修改密码
+│   │   │       ├── auth.py                 ← 登录/SSE票据/修改密码/退出审计
 │   │   │       ├── submissions.py          ← 作业提交 + Hint 接口
 │   │   │       ├── assignments.py          ← 作业管理（教师 CRUD）
 │   │   │       ├── teacher.py              ← HITL 队列 + 班级分析 + 导出
@@ -59,7 +61,7 @@ aoxiang/                                    ← 项目根目录
 │   │   │
 │   │   ├── db/
 │   │   │   ├── pool.py                     ← asyncpg Pool 工厂（min_size=5, max_size=25）
-│   │   │   ├── session.py                  ← TenantSession（SET LOCAL RLS 上下文）
+│   │   │   ├── session.py                  ← tenant_conn 事务依赖（SET LOCAL RLS 上下文）
 │   │   │   └── migrations/
 │   │   │       ├── 001_initial_schema.sql  ← 14张表 DDL + 约束
 │   │   │       ├── 002_indexes.sql         ← 所有索引（含部分索引）
@@ -129,7 +131,7 @@ aoxiang/                                    ← 项目根目录
 │   │       ├── mock_llm.py                 ← MockLLM（monkeypatch LLM 调用）
 │   │       ├── metrics.py                  ← 精确率/FPR/FNR/置信度校准误差计算
 │   │       ├── dataset_validator.py        ← CI 用例格式验证脚本
-│   │       └── cases/                      ← 160+ 标注用例（JSONL 格式）
+│   │       └── cases/                      ← 固定180条标注用例（JSONL 格式）
 │   │           ├── grade1_arithmetic_easy.jsonl
 │   │           ├── grade2_arithmetic_medium.jsonl
 │   │           ├── grade3_arithmetic_hard.jsonl
@@ -265,7 +267,7 @@ make lint  # → 零告警
 
 **Week 2 任务**：
 - 5 轮数据库迁移（initial_schema → indexes → RLS → triggers → views）
-- asyncpg 连接池（min_size=5, max_size=25）+ TenantSession（SET LOCAL 注入）
+- asyncpg 连接池（min_size=5, max_size=25）+ tenant_conn 显式事务（SET LOCAL 注入）
 - 测试：多租户隔离验证（A 校用户查不到 B 校数据）
 
 **Week 3 任务**：
@@ -317,13 +319,13 @@ make lint  # → 零告警
 - Qdrant 集合初始化（HNSW m=16, ef_construct=250）+ seed 知识点标签向量化
 - RAG 检索（相似度阈值0.85，超时500ms静默降级）
 - Harness Runner（MockLLM + 真实LLM 两种模式）
-- 160+ 标注用例编写（含边界用例：中文数字/带单位/等价写法）
+- 固定180条标注用例编写（含计算题/填空题/选择题及边界用例）
 - CI Harness 门禁：MockLLM 准确率 < 94% 阻断 PR 合并
 
 **验收标准**：
 ```bash
 pytest tests/integration/test_grading_pipeline.py  # 所有场景通过
-python scripts/run_harness_ci.py --mock --fail-below 0.94  # 准确率 ≥ 94%
+python scripts/run_harness_ci.py --mock --min-cases 180 --fail-below 0.94  # 固定180条且准确率 ≥ 94%
 # 提交 PR → CI Harness 自动触发 → 准确率 < 94% → CI 失败阻断合并
 ```
 
@@ -525,33 +527,16 @@ async def create_pool(dsn: str) -> asyncpg.Pool:
 from contextlib import asynccontextmanager
 import asyncpg
 
-class TenantSession:
-    """
-    在每次数据库连接上激活 RLS 策略。
-    通过 SET LOCAL 注入 tenant_id 和 user_id，触发 PostgreSQL 行级安全策略，
-    确保所有 SQL 查询自动被租户隔离，无法访问其他学校的数据。
-    """
-    def __init__(self, conn: asyncpg.Connection, tenant_id: str, user_id: str):
-        self._conn = conn
-        self._tenant_id = tenant_id
-        self._user_id = user_id
-
-    async def __aenter__(self) -> asyncpg.Connection:
-        await self._conn.execute(
-            "SELECT set_config('app.current_tenant_id', $1, true),"
-            "       set_config('app.current_user_id',   $2, true)",
-            self._tenant_id, self._user_id,
-        )
-        return self._conn
-
-    async def __aexit__(self, exc_type, exc, tb):
-        pass  # 归还连接池时配置变量自动重置（SET LOCAL 事务作用域）
-
 @asynccontextmanager
 async def tenant_conn(pool: asyncpg.Pool, tenant_id: str, user_id: str):
-    """FastAPI 依赖注入用：async with tenant_conn(pool, t, u) as conn: ..."""
+    """每个业务事务都显式设置 RLS 上下文；SET LOCAL 在事务结束时自动清除。"""
     async with pool.acquire() as conn:
-        async with TenantSession(conn, tenant_id, user_id):
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT set_config('app.current_tenant_id', $1, true),"
+                "       set_config('app.current_user_id',   $2, true)",
+                tenant_id, user_id,
+            )
             yield conn
 ```
 
@@ -629,7 +614,7 @@ class PromptCache:
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-import uuid, time
+import re, uuid, time
 from app.core.security import decode_access_token
 from app.core.logging import get_logger
 
@@ -638,11 +623,16 @@ logger = get_logger()
 _PUBLIC_PATHS = frozenset({
     "/health", "/api/v1/auth/login", "/api/docs", "/openapi.json"
 })
+_SSE_EVENTS_PATH = re.compile(r"^/api/v1/submissions/[^/]+/events$")
 
 class AuthMiddleware(BaseHTTPMiddleware):
     """JWT 验证：公开路径白名单，其余强制认证。"""
     async def dispatch(self, request: Request, call_next):
         if request.url.path in _PUBLIC_PATHS:
+            return await call_next(request)
+        if request.method == "GET" and _SSE_EVENTS_PATH.fullmatch(request.url.path):
+            # EventSource 无法设置 Authorization；此路由必须 GETDEL 一次性票据，
+            # 恢复 request.state.user/tenant 上下文并执行资源归属 + RLS 校验。
             return await call_next(request)
         auth = request.headers.get("Authorization", "")
         if not auth.startswith("Bearer "):
@@ -683,13 +673,14 @@ from app.ai.graph import grading_graph
 class HarnessResult:
     total: int;  passed: int;  failed: int
     accuracy: float                         # passed / total
-    fpr: float                              # 误判率：正确判错 / 所有正确用例
-    fnr: float                              # 漏判率：错误判对 / 所有错误用例
+    fpr: float                              # 假阳性率：错误答案判为正确 / 所有错误用例
+    fnr: float                              # 假阴性率：正确答案判为错误 / 所有正确用例
     error_cls_accuracy: float              # 错误类型分类准确率
     failed_cases: list[dict]               # 失败用例详情（供 CI 日志展示）
 
 async def run_harness(cases_dir: str, use_mock: bool = True,
                       sample_rate: float = 1.0,
+                      min_cases: int = 180,
                       accuracy_threshold: float = 0.94) -> HarnessResult:
     all_cases = sorted(Path(cases_dir).rglob("*.jsonl"))
     cases = []
@@ -697,6 +688,10 @@ async def run_harness(cases_dir: str, use_mock: bool = True,
         for line in f.read_text().splitlines():
             if line.strip():
                 cases.append(json.loads(line))
+
+    # Phase 1 基线固定为180条；先校验完整数据集，再进行真实LLM抽样。
+    if len(cases) != min_cases:
+        raise ValueError(f"Harness基线必须恰好为{min_cases}条，实际为{len(cases)}条")
 
     if sample_rate < 1.0:
         cases = random.sample(cases, max(1, int(len(cases) * sample_rate)))
@@ -723,8 +718,8 @@ async def run_harness(cases_dir: str, use_mock: bool = True,
     # 计算辅助指标
     correct_cases = [r for r in valid if r["expected_correct"] is True]
     wrong_cases   = [r for r in valid if r["expected_correct"] is False]
-    fpr = sum(1 for r in correct_cases if not r["ai_correct"]) / max(len(correct_cases), 1)
-    fnr = sum(1 for r in wrong_cases if r["ai_correct"])       / max(len(wrong_cases),   1)
+    fpr = sum(1 for r in wrong_cases if r["ai_correct"])       / max(len(wrong_cases),   1)
+    fnr = sum(1 for r in correct_cases if not r["ai_correct"]) / max(len(correct_cases), 1)
     cls_total  = [r for r in valid if not r["expected_correct"] and r["expected_error_type"]]
     cls_passed = [r for r in cls_total if r.get("ai_error_type") == r["expected_error_type"]]
     cls_acc    = len(cls_passed) / max(len(cls_total), 1)
@@ -815,6 +810,7 @@ export const useHitlStore = create<HitlStore>((set) => ({
 ```typescript
 // src/shared/hooks/useGradingEvents.ts
 import { useEffect } from 'react'
+import { api } from '../api/client'
 import { useSubmissionStore } from '../stores/submissionStore'
 
 export function useGradingEvents(submissionId: string | null) {
@@ -822,21 +818,44 @@ export function useGradingEvents(submissionId: string | null) {
 
   useEffect(() => {
     if (!submissionId) return
-    setStatus('connecting')
-    // EventSource 自动重连；服务端通过同源 HttpOnly Cookie 或短期 sse_ticket 鉴权
-    const source = new EventSource(`/api/v1/submissions/${submissionId}/events`)
-    source.addEventListener('grading_update', (event) => {
-      const data = JSON.parse((event as MessageEvent).data)
-      setResult(data)
-      if (data.results?.every((r: any) => r.routed_to_human === false)) {
-        setStatus('done')
-        source.close()
-      } else {
-        setStatus('hitl')
+    let source: EventSource | null = null
+    let retryTimer: ReturnType<typeof setTimeout> | null = null
+    let stopped = false
+
+    const connect = async () => {
+      setStatus('connecting')
+      const { data } = await api.post('/auth/sse-ticket', { submission_id: submissionId })
+      if (stopped) return
+      const ticket = encodeURIComponent(data.data.ticket)
+      source = new EventSource(`/api/v1/submissions/${submissionId}/events?sse_ticket=${ticket}`)
+      source.addEventListener('grading_update', (event) => {
+        const result = JSON.parse((event as MessageEvent).data)
+        setResult(result)
+        if (result.results?.every((r: any) => r.routed_to_human === false)) {
+          setStatus('done')
+          stopped = true
+          source?.close()
+        } else {
+          setStatus('hitl')
+        }
+      })
+      source.onerror = () => {
+        source?.close()
+        if (!stopped) {
+          setStatus('reconnecting')
+          retryTimer = setTimeout(connect, 2000)
+        }
       }
+    }
+    connect().catch(() => {
+      setStatus('reconnecting')
+      if (!stopped) retryTimer = setTimeout(connect, 2000)
     })
-    source.onerror = () => setStatus('reconnecting')
-    return () => source.close()
+    return () => {
+      stopped = true
+      source?.close()
+      if (retryTimer) clearTimeout(retryTimer)
+    }
   }, [submissionId, setResult, setStatus])
 }
 ```
@@ -911,6 +930,10 @@ lint-frontend:
     - cd frontend && npm ci --silent
     - npm run lint
     - npm run type-check
+    - npm run build
+  artifacts:
+    paths: [frontend/dist/]
+    expire_in: 7 days
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
 
@@ -961,7 +984,8 @@ harness-mock:
       uv run python scripts/run_harness_ci.py \
         --cases backend/app/harness/cases \
         --mock \
-        --threshold 0.94
+        --min-cases 180 \
+        --fail-below 0.94
     - |
       python3 -c "
       import json, sys
@@ -991,12 +1015,13 @@ harness-real:
   script:
     - uv run python scripts/run_harness_ci.py
         --cases backend/app/harness/cases
-        --sample 0.2 --threshold 0.88
+        --sample-ratio 0.2 --min-cases 180 --fail-below 0.94
   artifacts:
     paths: [harness_report.json]
   rules:
     - if: '$CI_COMMIT_BRANCH == "main"'
   when: manual      # 发布前手动触发
+  allow_failure: false
 
 # ─────────────────────────────────────────
 # 安全扫描（main 分支）
@@ -1031,11 +1056,12 @@ deploy-production:
     - |
       ssh deploy@$PROD_HOST "
         set -e
-        cd /opt/aoxiang
+        cd /opt/math-grader
         git pull origin main
+        cd frontend && npm ci --silent && npm run build && test -f dist/index.html && cd ..
         docker compose pull --quiet
         docker compose up -d --build --remove-orphans
-        docker compose exec -T backend python -m alembic upgrade head
+        docker compose exec -T app python -m alembic upgrade head
         sleep 10
         curl -sf http://localhost:8000/health | grep -q '\"status\":\"ok\"'
         echo '部署成功！'
@@ -1132,7 +1158,7 @@ main ← 受保护分支（需1名代码审查通过 + CI 全绿才能合并）
 
 # 示例：
 feat(grading): implement sympy verifier node for arithmetic problems
-fix(auth): resolve refresh token expiry race condition
+feat(auth): implement JWT login, access-token expiry policy and logout audit
 test(harness): add 25 boundary cases for chinese numeral answers
 perf(llm): enable prefix cache warmup with 1100-token static prefix
 docs(api): update HITL review endpoint response schema
@@ -1178,7 +1204,7 @@ addopts      = "-x -q --tb=short"
 
 ### 7.4 环境变量管理（三套）
 
-```bash
+```dotenv
 # .env.example（提交到 Git，含完整注释）
 DATABASE_URL=postgresql://user:pass@postgres:5432/aoxiang
 REDIS_URL=redis://:pass@redis:6379/0
@@ -1195,8 +1221,10 @@ MAX_LLM_RETRIES=3
 LLM_TIMEOUT_SECONDS=30
 CORS_ORIGINS=["https://school-grader.internal"]
 ALLOWED_HOSTS=["school-grader.internal","localhost"]
-DB_POOL_SIZE=25
+DB_MIN_SIZE=5
+DB_MAX_SIZE=25
 DB_MAX_INACTIVE_LIFETIME=300
+DB_COMMAND_TIMEOUT=30
 
 # .env.test（CI 环境，自动生成密钥，MockLLM 模式）
 DATABASE_URL=postgresql://ci:ci@postgres/ci
@@ -1315,10 +1343,10 @@ $$ LANGUAGE plpgsql;
 
 ### 基础设施（5项）
 - [ ] **1.** PostgreSQL 每日全量备份已配置（`pg_dump -Fc`，保留30天，cron 02:00）
-- [ ] **2.** Redis 持久化模式已改为 AOF（`appendonly yes`，防重启丢失 HITL 队列）
+- [ ] **2.** Redis 持久化模式已改为 AOF（`appendonly yes`，用于提升限流/登录锁定/业务缓存的重启连续性；HITL 数据仍以 PostgreSQL 为唯一真源）
 - [ ] **3.** Nginx SSL 证书已配置，TLS 1.2+ only，HSTS 响应头已启用
 - [ ] **4.** Docker volume 已挂载到独立数据盘（`/data`，≥ 100GB SSD）
-- [ ] **5.** 防火墙已配置：仅 80/443/22 对外开放，PG/Redis/Qdrant 绑定 127.0.0.1
+- [ ] **5.** 防火墙已配置：仅 80/443/22 对外开放；PG/Redis/Qdrant 的宿主机端口映射仅绑定 `127.0.0.1`，Redis 容器内监听 `0.0.0.0` 供 Docker 内网访问
 
 ### 安全（5项）
 - [ ] **6.** 所有密钥由 `openssl rand` 生成（非示例默认值），.env 权限 600
@@ -1333,7 +1361,7 @@ $$ LANGUAGE plpgsql;
 - [ ] **13.** HITL 三种路径验证：AI 通过 / 教师覆盖为正确 / 教师覆盖为错误
 - [ ] **14.** hint_level 0→3 递进测试：确认 0/1 级不泄露答案，3 级展示完整解法
 - [ ] **15.** 低置信度（< 0.85）批改进入 HITL 队列，学生看到"老师正在批改"
-- [ ] **16.** Harness MockLLM 最终验收运行：准确率 ≥ 94%（`python scripts/run_harness_ci.py --mock --fail-below 0.94`）
+- [ ] **16.** Harness MockLLM 最终验收运行：固定180条且准确率 ≥ 94%（`python scripts/run_harness_ci.py --mock --min-cases 180 --fail-below 0.94`）
 
 ### 性能（2项）
 - [ ] **17.** Locust 压测报告：50并发，5分钟，P95 < 3s，5xx 错误率 0%
@@ -1371,10 +1399,10 @@ test-int:
 	uv run pytest backend/tests/integration -x -q
 
 harness:    ## 运行 Harness（MockLLM）
-	uv run python scripts/run_harness_ci.py --cases backend/app/harness/cases --mock
+	uv run python scripts/run_harness_ci.py --cases backend/app/harness/cases --mock --min-cases 180 --fail-below 0.94
 
 harness-real: ## 真实 LLM 20% 抽样
-	uv run python scripts/run_harness_ci.py --cases backend/app/harness/cases --sample 0.2
+	uv run python scripts/run_harness_ci.py --cases backend/app/harness/cases --sample-ratio 0.2 --min-cases 180 --fail-below 0.94
 
 gen-prod-env: ## 生成生产环境 .env（随机密钥）
 	@echo "SECRET_KEY=$$(openssl rand -hex 32)"         >> .env.production
@@ -1472,14 +1500,16 @@ AI：    ·    ····  ····  ····  ████  ████  ██�
 #!/bin/bash
 # 执行前提：Ubuntu 22.04 LTS，已联网，已有 DEEPSEEK_API_KEY 和 QIANWEN_API_KEY
 
-# ── 步骤 1：安装 Docker（约 3 分钟）────────────────────────────────
+# ── 步骤 1：安装 Docker、Node.js 20（约 5 分钟）────────────────────
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER && newgrp docker
-sudo apt install -y nginx git
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nginx git nodejs
 
 # ── 步骤 2：拉取代码（约 1 分钟）───────────────────────────────────
-sudo git clone https://git.school-internal.com/aoxiang.git /opt/aoxiang
-cd /opt/aoxiang
+sudo git clone https://git.school-internal.com/math-grader.git /opt/math-grader
+sudo chown -R "$USER:$USER" /opt/math-grader
+cd /opt/math-grader
 
 # ── 步骤 3：生成生产密钥（约 1 分钟，交互填写 API Key）─────────────
 make gen-prod-env
@@ -1487,16 +1517,17 @@ make gen-prod-env
 # → 提示手动填写 DEEPSEEK_API_KEY 和 QIANWEN_API_KEY
 vim .env.production   # 仅需填写 2 行 API Key
 
-# ── 步骤 4：启动所有服务（约 10-15 分钟，主要是拉取 Docker 镜像）───
+# ── 步骤 4：构建前端并启动所有服务（约 10-15 分钟）───────────────
+cd frontend && npm ci && npm run build && test -f dist/index.html && cd ..
 docker compose --env-file .env.production up -d --build
 # 等待所有服务 healthy（观察直到无 starting 状态）
 watch docker compose ps
 
 # ── 步骤 5：初始化数据库（约 2 分钟）───────────────────────────────
-docker compose exec backend uv run alembic upgrade head          # 建表
-docker compose exec backend uv run python scripts/create_admin.py    # 创建管理员
-docker compose exec backend uv run python scripts/seed_knowledge_tags.py  # 40个知识点
-docker compose exec backend uv run python scripts/init_qdrant.py     # 向量集合
+docker compose exec app uv run alembic upgrade head          # 建表
+docker compose exec app uv run python scripts/create_admin.py    # 创建管理员
+docker compose exec app uv run python scripts/seed_knowledge_tags.py  # 40个知识点
+docker compose exec app uv run python scripts/init_qdrant.py     # 向量集合
 
 # ── 步骤 6：Nginx SSL 配置（约 5 分钟）─────────────────────────────
 sudo mkdir -p /etc/nginx/ssl
@@ -1525,7 +1556,7 @@ echo "✅ 部署完成。请访问 https://$(hostname) 或 https://school-grader
 | 现象 | 排查命令 | 解决方案 |
 |------|---------|---------|
 | `docker compose ps` 某服务 `unhealthy` | `docker compose logs <服务名> --tail 30` | 检查日志中的具体错误，最常见是 .env 密码含特殊字符 |
-| Harness 准确率为 0% | `docker compose logs backend --tail 20` | USE_MOCK_LLM=false 且 API Key 无效时会全部降级为 fallback |
-| Nginx 502 Bad Gateway | `curl http://localhost:8000/health` | 确认 backend 容器运行中；检查 proxy_pass 端口配置 |
-| 数据库迁移失败 | `docker compose exec backend uv run alembic current` | 确认 postgres 容器已 healthy；检查 DATABASE_URL 中密码无特殊字符 |
+| Harness 准确率为 0% | `docker compose logs app --tail 20` | USE_MOCK_LLM=false 且 API Key 无效时会全部降级为 fallback |
+| Nginx 502 Bad Gateway | `curl http://localhost:8000/health` | 确认 app 容器运行中；检查 proxy_pass 端口配置 |
+| 数据库迁移失败 | `docker compose exec app uv run alembic current` | 确认 postgres 容器已 healthy；检查 DATABASE_URL 中密码无特殊字符 |
 | 磁盘不足（pull 镜像时） | `df -h && docker system df` | `docker system prune -f` 清理悬空镜像 |
