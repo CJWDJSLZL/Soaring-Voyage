@@ -1,0 +1,221 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import jwt
+import pytest
+from app.config import settings
+from app.main import app
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture(autouse=True)
+def reset_state():
+    app.state.store.reset()
+
+
+@pytest.fixture
+def client():
+    return TestClient(app)
+
+
+def login(client: TestClient, username: str, password: str = "Test@1234") -> str:
+    response = client.post("/api/v1/auth/login", json={"username": username, "password": password})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["code"] == 0 and body["trace_id"].startswith("req-")
+    return body["data"]["access_token"]
+
+
+def auth(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def make_problem_and_assignment(client: TestClient, teacher_token: str, *, answer: str = "372"):
+    problem = client.post(
+        "/api/v1/problems/",
+        headers=auth(teacher_token),
+        json={
+            "problem_text": "325 + 47 = ___",
+            "problem_type": "arithmetic",
+            "reference_answer": answer,
+            "grade_level": 3,
+            "difficulty": "medium",
+            "curriculum_version": "人教版",
+            "solution_steps": ["个位相加并处理进位", "再计算十位和百位"],
+            "tags": ["加法", "进位"],
+        },
+    )
+    assert problem.status_code == 201, problem.text
+    problem_id = problem.json()["data"]["problem_id"]
+    assignment = client.post(
+        "/api/v1/assignments/",
+        headers=auth(teacher_token),
+        json={
+            "title": "第三单元练习",
+            "class_ids": ["class-3a"],
+            "due_date": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            "problem_ids": [problem_id],
+        },
+    )
+    assert assignment.status_code == 201, assignment.text
+    return problem_id, assignment.json()["data"]["assignment_id"]
+
+
+def test_login_jwt_claims_and_uniform_validation_error(client: TestClient):
+    token = login(client, "student")
+    claims = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+    assert claims["role"] == "student"
+    assert claims["tenant_id"] == "tenant-demo"
+    assert 86390 <= claims["exp"] - claims["iat"] <= 86400
+
+    invalid = client.post("/api/v1/auth/login", json={"username": "has space", "password": "123"})
+    assert invalid.status_code == 422
+    assert invalid.json()["code"] == 4022
+    assert invalid.json()["trace_id"].startswith("req-")
+
+
+def test_login_five_failures_lock_account(client: TestClient):
+    for _ in range(4):
+        response = client.post("/api/v1/auth/login", json={"username": "student", "password": "wrongxx"})
+        assert response.status_code == 401
+    fifth = client.post("/api/v1/auth/login", json={"username": "student", "password": "wrongxx"})
+    assert fifth.status_code == 401
+    assert fifth.json()["locked_until"]
+    locked = client.post("/api/v1/auth/login", json={"username": "student", "password": "Test@1234"})
+    assert locked.status_code == 401
+    assert "锁定" in locked.json()["message"]
+
+
+def test_rbac_problem_assignment_and_student_answer_isolation(client: TestClient):
+    student = login(client, "student")
+    teacher = login(client, "teacher")
+
+    denied = client.post("/api/v1/problems/", headers=auth(student), json={})
+    assert denied.status_code == 403 and denied.json()["code"] == 4003
+
+    problem_id, assignment_id = make_problem_and_assignment(client, teacher)
+    detail = client.get(f"/api/v1/assignments/{assignment_id}", headers=auth(student))
+    assert detail.status_code == 200
+    serialized = detail.text.lower()
+    assert "reference_answer" not in serialized
+    assert "solution_steps" not in serialized
+
+    assert detail.json()["data"]["problems"][0]["problem_id"] == problem_id
+
+
+def test_core_submission_hint_and_duplicate_loop(client: TestClient):
+    teacher = login(client, "teacher")
+    student = login(client, "student")
+    problem_id, assignment_id = make_problem_and_assignment(client, teacher)
+
+    response = client.post(
+        "/api/v1/submissions/",
+        headers=auth(student),
+        json={"assignment_id": assignment_id, "answers": [{"problem_id": problem_id, "answer_text": "362"}]},
+    )
+    assert response.status_code == 201, response.text
+    result = response.json()["data"]
+    submission_id = result["submission_id"]
+    assert result["status"] == "graded"
+    assert result["results"][0]["is_correct"] is False
+    assert "reference_answer" not in response.text
+    assert all("agent_trace" not in item for item in result["results"])
+
+    duplicate = client.post(
+        "/api/v1/submissions/",
+        headers=auth(student),
+        json={"assignment_id": assignment_id, "answers": [{"problem_id": problem_id, "answer_text": "372"}]},
+    )
+    assert duplicate.status_code == 409 and duplicate.json()["code"] == 4005
+
+    hint = client.post(
+        f"/api/v1/submissions/{submission_id}/hint",
+        headers=auth(student),
+        json={"problem_id": problem_id, "new_answer": "372"},
+    )
+    assert hint.status_code == 200
+    assert hint.json()["data"]["is_correct"] is True
+    assert hint.json()["data"]["hint_level"] == 1
+
+    other_student = login(client, "student2")
+    hidden = client.get(f"/api/v1/submissions/{submission_id}", headers=auth(other_student))
+    assert hidden.status_code == 404
+
+
+def test_hitl_review_and_one_time_sse_ticket(client: TestClient):
+    teacher = login(client, "teacher")
+    student = login(client, "student")
+    problem_id, assignment_id = make_problem_and_assignment(client, teacher)
+    submitted = client.post(
+        "/api/v1/submissions/",
+        headers=auth(student),
+        json={"assignment_id": assignment_id, "answers": [{"problem_id": problem_id, "answer_text": "uncertain:362"}]},
+    )
+    data = submitted.json()["data"]
+    assert data["status"] == "partial_human_review"
+    submission_id = data["submission_id"]
+
+    queue = client.get("/api/v1/teacher/human-review-queue", headers=auth(teacher))
+    assert queue.status_code == 200
+    assert queue.headers["X-Pending-Review-Count"] == "1"
+    review = queue.json()["data"]["items"][0]
+    assert review["reference_answer"] == "372"
+
+    ticket_response = client.post(
+        "/api/v1/auth/sse-ticket", headers=auth(student), json={"submission_id": submission_id}
+    )
+    assert ticket_response.status_code == 200
+    ticket = ticket_response.json()["data"]["ticket"]
+    with client.stream("GET", f"/api/v1/submissions/{submission_id}/events?sse_ticket={ticket}&follow=false") as events:
+        assert events.status_code == 200
+        assert "event: grading_update" in "".join(events.iter_text())
+    reused = client.get(f"/api/v1/submissions/{submission_id}/events?sse_ticket={ticket}")
+    assert reused.status_code == 401
+
+    reviewed = client.post(
+        f"/api/v1/teacher/human-review/{review['review_id']}",
+        headers=auth(teacher),
+        json={
+            "override_correct": False,
+            "override_error_type": "进位错误",
+            "override_feedback": "请再检查进位步骤。",
+            "reviewer_notes": "人工确认",
+            "is_training_example": True,
+        },
+    )
+    assert reviewed.status_code == 200
+    final = client.get(f"/api/v1/submissions/{submission_id}", headers=auth(student)).json()["data"]
+    assert final["status"] == "reviewed"
+    assert final["results"][0]["grading_source"] == "human_override"
+    assert final["summary"]["wrong"] == 1
+    assert final["summary"]["accuracy"] == 0
+    assert "reference_answer" not in str(final)
+
+
+def test_hint_level_increments_and_stops_after_three(client: TestClient):
+    teacher = login(client, "teacher")
+    student = login(client, "student")
+    problem_id, assignment_id = make_problem_and_assignment(client, teacher)
+    submitted = client.post(
+        "/api/v1/submissions/",
+        headers=auth(student),
+        json={"assignment_id": assignment_id, "answers": [{"problem_id": problem_id, "answer_text": "0"}]},
+    )
+    submission_id = submitted.json()["data"]["submission_id"]
+    for expected_level in (1, 2, 3):
+        response = client.post(
+            f"/api/v1/submissions/{submission_id}/hint",
+            headers=auth(student),
+            json={"problem_id": problem_id, "new_answer": "0"},
+        )
+        assert response.status_code == 200
+        assert response.json()["data"]["hint_level"] == expected_level
+        assert response.json()["data"]["remaining_hints"] == 3 - expected_level
+    exhausted = client.post(
+        f"/api/v1/submissions/{submission_id}/hint",
+        headers=auth(student),
+        json={"problem_id": problem_id, "new_answer": "0"},
+    )
+    assert exhausted.status_code == 409
+    assert exhausted.json()["code"] == 4007

@@ -1,0 +1,41 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# JavaScript
+node_modules/
+frontend/dist/
+
+# Runtime and reports
+logs/
+backup/
+*.log
+harness_report.json
+backend/reports/
+perf_reports/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Build
+build/
+dist/
