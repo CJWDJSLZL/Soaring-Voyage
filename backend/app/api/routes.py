@@ -16,10 +16,10 @@ from app.config import settings
 from app.core.errors import AppError, envelope, utcnow
 from app.core.security import create_access_token, hash_password, verify_password
 from app.domain.models import Ticket, User
-from app.domain.repository import Repository
+from app.domain.repository import IdentityProblemRepository, Repository
 from app.grading import GradeRequest, LLMVerdict, QuestionType, route_grade
 
-from .dependencies import current_user, get_store, require_roles
+from .dependencies import current_user, get_identity_repository, get_store, require_roles
 from .schemas import (
     AssignmentCreate,
     AssignmentPatch,
@@ -152,8 +152,13 @@ def public_submission(submission: dict) -> dict:
 
 
 @router.post("/auth/login")
-def login(payload: LoginRequest, request: Request, store: Repository = Depends(get_store)):
-    user = store.users.get(payload.username)
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    configured = request.app.state.settings
+    user = await repository.identity_by_username(payload.username)
     now = utcnow()
     if user is not None and user.locked_until and user.locked_until > now:
         remaining = max(1, int((user.locked_until - now).total_seconds() / 60) + 1)
@@ -166,19 +171,27 @@ def login(payload: LoginRequest, request: Request, store: Repository = Depends(g
     valid = user is not None and verify_password(payload.password, user.password_hash)
     if not valid:
         if user is not None:
-            user.failed_logins += 1
-            if user.failed_logins >= settings.login_max_failures:
-                user.locked_until = now + timedelta(minutes=settings.login_lock_minutes)
-                raise AppError(401, 4001, "账户已锁定，请 15 分钟后重试", locked_until=user.locked_until.isoformat())
+            user = await repository.register_login_failure(
+                user,
+                max_failures=configured.login_max_failures,
+                locked_until=now + timedelta(minutes=configured.login_lock_minutes),
+            )
+            if user.failed_logins >= configured.login_max_failures:
+                effective_lock = user.locked_until or now + timedelta(minutes=configured.login_lock_minutes)
+                raise AppError(
+                    401,
+                    4001,
+                    "账户已锁定，请 15 分钟后重试",
+                    locked_until=effective_lock.isoformat(),
+                )
         raise AppError(401, 4001, "用户名或密码错误")
     user = cast(User, user)  # narrowed after the invalid-credential branch
-    user.failed_logins = 0
-    user.locked_until = None
-    token = create_access_token(user)
+    await repository.clear_login_failures(user)
+    token = create_access_token(user, configured)
     data = {
         "access_token": token,
         "token_type": "bearer",  # nosec B105
-        "expires_in": settings.jwt_expires_seconds,
+        "expires_in": configured.jwt_expires_seconds,
         "user": {
             "user_id": user.user_id,
             "display_name": user.display_name,
@@ -192,10 +205,11 @@ def login(payload: LoginRequest, request: Request, store: Repository = Depends(g
 
 
 @router.post("/auth/change-password")
-def change_password(
+async def change_password(
     payload: ChangePasswordRequest,
     request: Request,
     user: User = Depends(current_user),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
     if not verify_password(payload.old_password, user.password_hash):
         raise AppError(401, 4001, "旧密码错误")
@@ -205,14 +219,17 @@ def change_password(
         or not any(c.isdigit() for c in payload.new_password)
     ):
         raise AppError(422, 4022, "请求参数校验失败", "Admin password requires letters and digits")
-    user.password_hash = hash_password(payload.new_password)
-    user.token_version += 1
+    await repository.replace_password(user, hash_password(payload.new_password, request.app.state.settings))
     return envelope(request)
 
 
 @router.post("/auth/logout")
-def logout(request: Request, user: User = Depends(current_user)):
-    user.token_version += 1
+async def logout(
+    request: Request,
+    user: User = Depends(current_user),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    await repository.increment_token_version(user)
     return envelope(request, message="已退出登录")
 
 
@@ -237,25 +254,18 @@ def sse_ticket(
 
 
 @router.post("/problems/", status_code=201)
-def create_problem(
+async def create_problem(
     payload: ProblemCreate,
     request: Request,
     user: User = Depends(require_roles("teacher", "admin", "sysadmin")),
-    store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
-    problem_id = ident()
-    store.problems[problem_id] = {
-        "problem_id": problem_id,
-        "tenant_id": user.tenant_id,
-        "created_by": user.user_id,
-        **payload.model_dump(),
-        "created_at": iso_now(),
-    }
+    problem_id = await repository.create_catalog_problem(user, payload.model_dump())
     return envelope(request, {"problem_id": problem_id, "embedding_status": "pending", "message": "题目已创建"})
 
 
 @router.get("/problems/")
-def list_problems(
+async def list_problems(
     request: Request,
     grade_level: int | None = Query(None, ge=1, le=6),
     problem_type: str | None = None,
@@ -264,18 +274,18 @@ def list_problems(
     page_number: int = Query(1, alias="page", ge=1),
     page_size: int = Query(20, ge=1, le=100),
     user: User = Depends(require_roles("teacher", "admin", "sysadmin")),
-    store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
-    items = [item for item in store.problems.values() if item["tenant_id"] == user.tenant_id]
-    if grade_level:
-        items = [item for item in items if item["grade_level"] == grade_level]
-    if problem_type:
-        items = [item for item in items if item["problem_type"] == problem_type]
-    if difficulty:
-        items = [item for item in items if item["difficulty"] == difficulty]
-    if keyword:
-        items = [item for item in items if keyword.lower() in item["problem_text"].lower()]
-    return envelope(request, page(items, page_number, page_size))
+    data = await repository.list_catalog_problems(
+        user,
+        grade_level=grade_level,
+        problem_type=problem_type,
+        difficulty=difficulty,
+        keyword=keyword,
+        page_number=page_number,
+        page_size=page_size,
+    )
+    return envelope(request, data)
 
 
 @router.post("/assignments/", status_code=201)
