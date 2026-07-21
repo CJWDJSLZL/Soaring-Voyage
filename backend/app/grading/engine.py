@@ -21,6 +21,7 @@ class GradeRequest(BaseModel):
     question_type: QuestionType
     grade: int = Field(ge=1, le=6)
     hint_level: int = Field(default=0, ge=0, le=3)
+    solution_steps: list[str] = Field(default_factory=list, max_length=20)
 
 
 class LLMVerdict(BaseModel):
@@ -62,7 +63,9 @@ def _hint_feedback(request: GradeRequest, is_correct: bool) -> tuple[str, HintSt
         return "想一想应该先算哪一步，再试一次。", "hint", False
     if request.hint_level == 2:
         return "你这道题差一点点。把每一步写出来并重新核对。", "strong_hint", False
-    return f"完整答案是 {request.reference_answer}。请对照步骤再理解一次。", "solution", True
+    steps = "；".join(request.solution_steps)
+    detail = f"解题步骤：{steps}。" if steps else ""
+    return f"完整答案是 {request.reference_answer}。{detail}请对照步骤再理解一次。", "solution", True
 
 
 class GradingEngine:
@@ -80,15 +83,16 @@ class GradingEngine:
             {"node": "Parser", "student": student, "reference": reference},
         ]
         if not student:
+            feedback, state, locked = _hint_feedback(request, False)
             return GradeResult(
                 is_correct=False,
                 confidence=1.0,
                 source="empty_answer",
                 needs_review=False,
-                feedback="你还没有填写答案哦",
+                feedback=feedback if locked else "你还没有填写答案哦",
                 hint_level=request.hint_level,
-                hint_state="retry",
-                locked=False,
+                hint_state=state,
+                locked=locked,
                 normalized_student_answer=student,
                 normalized_reference_answer=reference,
                 agent_trace=trace + [{"node": "Router", "route": "empty_answer"}],
