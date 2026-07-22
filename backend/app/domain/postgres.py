@@ -1671,6 +1671,74 @@ class PostgresIdentityProblemRepository:
                 normalized_assignment_id,
                 cutoff,
             )
+            alert_rows = await connection.fetch(
+                """
+                WITH visible_submissions AS (
+                    SELECT DISTINCT s.id, s.student_id
+                    FROM submissions s
+                    JOIN assignment_classes ac ON ac.tenant_id = s.tenant_id AND ac.assignment_id = s.assignment_id
+                    WHERE s.tenant_id = $1
+                      AND ac.class_id = ANY($2::uuid[])
+                      AND ($3::uuid IS NULL OR s.assignment_id = $3::uuid)
+                      AND s.submitted_at >= $4
+                ),
+                latest AS (
+                    SELECT DISTINCT ON (gr.submission_id, gr.problem_id)
+                           gr.id AS grading_result_id,
+                           gr.submission_id,
+                           gr.problem_id,
+                           gr.is_correct,
+                           gr.error_type,
+                           vs.student_id,
+                           p.tags
+                    FROM grading_results gr
+                    JOIN visible_submissions vs ON vs.id = gr.submission_id
+                    JOIN problems p ON p.id = gr.problem_id
+                    WHERE gr.tenant_id = $1
+                    ORDER BY gr.submission_id, gr.problem_id, gr.attempt_number DESC
+                ),
+                tagged AS (
+                    SELECT latest.*,
+                           tag,
+                           COALESCE(NULLIF(seh.knowledge_point, ''), tag) AS alert_point
+                    FROM latest
+                    CROSS JOIN LATERAL unnest(
+                        CASE WHEN cardinality(latest.tags) > 0
+                             THEN latest.tags
+                             ELSE ARRAY[COALESCE(latest.error_type, 'unknown')]
+                        END
+                    ) AS tag
+                    LEFT JOIN student_error_history seh
+                      ON seh.tenant_id = $1
+                     AND seh.grading_result_id = latest.grading_result_id
+                ),
+                totals AS (
+                    SELECT tag AS knowledge_point, COUNT(*) AS total_results
+                    FROM tagged
+                    GROUP BY tag
+                ),
+                wrong AS (
+                    SELECT alert_point AS knowledge_point,
+                           COUNT(DISTINCT student_id) AS affected_student_count
+                    FROM tagged
+                    WHERE is_correct IS FALSE
+                    GROUP BY alert_point
+                )
+                SELECT wrong.knowledge_point,
+                       wrong.affected_student_count,
+                       totals.total_results,
+                       wrong.affected_student_count::double precision / totals.total_results AS error_rate
+                FROM wrong
+                JOIN totals ON totals.knowledge_point = wrong.knowledge_point
+                WHERE wrong.affected_student_count::double precision / totals.total_results >= 0.4
+                ORDER BY error_rate DESC, wrong.knowledge_point
+                LIMIT 5
+                """,
+                user.tenant_id,
+                class_ids,
+                normalized_assignment_id,
+                cutoff,
+            )
         total_submissions = int(overview["total_submissions"] or 0)
         total_results = int(overview["total_results"] or 0)
         correct_results = int(overview["correct_results"] or 0)
@@ -1690,7 +1758,16 @@ class PostgresIdentityProblemRepository:
                 "human_review_rate": round(human_review_results / total_results, 3) if total_results else 0.0,
             },
             "error_distribution": {row["error_type"]: int(row["count"]) for row in error_rows},
-            "knowledge_point_alerts": [],
+            "knowledge_point_alerts": [
+                {
+                    "knowledge_point": row["knowledge_point"],
+                    "error_rate": round(float(row["error_rate"] or 0), 3),
+                    "alert_level": "high",
+                    "alert": "超过40%学生在此知识点出错，建议重点讲解",
+                    "affected_student_count": int(row["affected_student_count"] or 0),
+                }
+                for row in alert_rows
+            ],
             "students_needing_attention": [],
             "pending_review_count": human_review_results,
             "accuracy_trend": [

@@ -495,6 +495,7 @@ async def test_teacher_dashboard_aggregates_visible_classes() -> None:
         [{"id": UUID(CLASS_ID), "name": "Class A"}],
         [{"error_type": "calculation_error", "count": 2}],
         [{"bucket": datetime(2026, 7, 20, tzinfo=UTC).date(), "total_results": 4, "correct_results": 3}],
+        [{"knowledge_point": "addition", "affected_student_count": 2, "total_results": 4, "error_rate": 0.5}],
     ]
     connection.fetchval.side_effect = [2, 1]
     connection.fetchrow.return_value = {
@@ -514,8 +515,19 @@ async def test_teacher_dashboard_aggregates_visible_classes() -> None:
     assert dashboard["overview"]["submission_rate"] == 0.5
     assert dashboard["overview"]["human_review_rate"] == 0.25
     assert dashboard["error_distribution"] == {"calculation_error": 2}
+    assert dashboard["knowledge_point_alerts"] == [
+        {
+            "knowledge_point": "addition",
+            "error_rate": 0.5,
+            "alert_level": "high",
+            "alert": "超过40%学生在此知识点出错，建议重点讲解",
+            "affected_student_count": 2,
+        }
+    ]
     class_sql = connection.fetch.await_args_list[0].args[0]
     assert "teacher_id = $4::uuid" in class_sql
+    alert_sql = connection.fetch.await_args_list[3].args[0]
+    assert "student_error_history" in alert_sql
 
 
 @pytest.mark.asyncio
