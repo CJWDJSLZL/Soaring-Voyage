@@ -655,7 +655,17 @@ async def test_assignment_export_returns_problem_stats_and_student_rows() -> Non
                     "top_error_types": [{"error_type": "calculation_error", "count": 1, "percentage": 1.0}],
                     "avg_hint_used": 1.0,
                 }
-            ]
+            ],
+            "error_distribution": {"calculation_error": 1},
+            "knowledge_point_alerts": [
+                {
+                    "knowledge_point": "addition",
+                    "error_rate": 1.0,
+                    "alert_level": "high",
+                    "alert": "超过40%学生在此知识点出错，建议重点讲解",
+                    "affected_student_count": 1,
+                }
+            ],
         }
     )
     teacher = PostgresIdentityProblemRepository.user_from_row(user_row())
@@ -664,6 +674,8 @@ async def test_assignment_export_returns_problem_stats_and_student_rows() -> Non
 
     assert exported["title"] == "Assignment"
     assert exported["problem_stats"][0]["problem_id"] == PROBLEM_ID
+    assert exported["error_distribution"] == {"calculation_error": 1}
+    assert exported["knowledge_point_alerts"][0]["knowledge_point"] == "addition"
     assert exported["student_rows"][0]["student_name"] == "Student"
     assert exported["student_rows"][0]["results"][0]["student_answer"] == "3"
     sql = connection.fetch.await_args.args[0]

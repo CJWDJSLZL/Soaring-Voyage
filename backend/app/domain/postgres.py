@@ -2171,6 +2171,8 @@ class PostgresIdentityProblemRepository:
             "assignment_id": normalized_assignment_id,
             "title": assignment["title"],
             "problem_stats": stats["problem_stats"],
+            "error_distribution": stats["error_distribution"],
+            "knowledge_point_alerts": stats["knowledge_point_alerts"],
             "student_rows": list(student_by_submission.values()),
         }
 
