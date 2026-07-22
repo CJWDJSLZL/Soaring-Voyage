@@ -60,13 +60,14 @@ def iso_now() -> str:
 def sse_event_stream(
     events: Iterable[dict],
     *,
+    last_event_id: int = 0,
     heartbeat_count: int | None = 1,
     follow: bool = False,
     poll_seconds: float = 15.0,
 ) -> Iterator[str]:
     """Stream the mutable event list and keep followed connections alive."""
     event_list = events if isinstance(events, list) else list(events)
-    cursor = 0
+    cursor = max(last_event_id, 0)
     heartbeats = 0
     while True:
         while cursor < len(event_list):
@@ -86,10 +87,17 @@ async def postgres_sse_event_stream(
     ticket: Ticket,
     *,
     follow: bool,
+    last_event_id: int = 0,
     poll_seconds: float = 15.0,
 ) -> AsyncIterator[str]:
-    cursor = 0
+    cursor = max(last_event_id, 0)
     last_updated_at: str | None = None
+    if cursor:
+        snapshot = await repository.submission_event_snapshot(ticket)
+        last_updated_at = snapshot["last_updated_at"]
+        if not follow:
+            yield ": heartbeat\n\n"
+            return
     while True:
         snapshot = await repository.submission_event_snapshot(ticket)
         if snapshot["last_updated_at"] != last_updated_at:
@@ -103,6 +111,16 @@ async def postgres_sse_event_stream(
             return
         await asyncio.sleep(poll_seconds)
         yield ": heartbeat\n\n"
+
+
+def parse_last_event_id(value: str | None) -> int:
+    if value is None:
+        return 0
+    try:
+        parsed = int(value)
+    except ValueError:
+        return 0
+    return max(parsed, 0)
 
 
 def page(items: list[dict], page_number: int, page_size: int) -> dict:
@@ -1199,9 +1217,10 @@ async def submission_events(
     ticket = await request.app.state.ticket_repository.consume(sse_ticket)
     if ticket is None or ticket.submission_id != submission_id:
         raise AppError(401, 4001, "SSE 票据无效或已过期")
+    last_event_id = parse_last_event_id(request.headers.get("last-event-id"))
     if request.app.state.settings.persistence_backend == "postgres":
         return StreamingResponse(
-            postgres_sse_event_stream(repository, ticket, follow=follow),
+            postgres_sse_event_stream(repository, ticket, follow=follow, last_event_id=last_event_id),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -1211,7 +1230,7 @@ async def submission_events(
 
     events = store.events.get(submission_id) or [{"submission_id": submission_id, "status": submission["status"]}]
     return StreamingResponse(
-        sse_event_stream(events, heartbeat_count=1, follow=follow),
+        sse_event_stream(events, last_event_id=last_event_id, heartbeat_count=1, follow=follow),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )

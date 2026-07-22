@@ -132,12 +132,50 @@ def test_sse_heartbeat_renderer_and_expired_ticket_cleanup() -> None:
     assert "event: grading_update" in chunks[0]
     assert chunks[1:] == [": heartbeat\n\n", ": heartbeat\n\n"]
 
+    resumed = list(sse_event_stream([{"status": "first"}, {"status": "second"}], last_event_id=1, heartbeat_count=0))
+    assert len(resumed) == 1
+    assert "id: 2" in resumed[0]
+    assert '"status": "second"' in resumed[0]
+
     app.state.store.reset()
     app.state.store.tickets["expired"] = Ticket(
         "u", "tenant-demo", "s", "student", datetime.now(UTC) - timedelta(seconds=1)
     )
     assert app.state.store.purge_expired_tickets() == 1
     assert not app.state.store.tickets
+
+
+def test_submission_events_resume_after_last_event_id() -> None:
+    app.state.store.reset()
+    client = TestClient(app)
+    teacher = login(client, "teacher")
+    student = login(client, "student")
+    problem_id, assignment_id = make_problem_and_assignment(client, teacher)
+    submitted = client.post(
+        "/api/v1/submissions/",
+        headers=auth(student),
+        json={"assignment_id": assignment_id, "answers": [{"problem_id": problem_id, "answer_text": "uncertain:0"}]},
+    )
+    assert submitted.status_code == 201, submitted.text
+    submission_id = submitted.json()["data"]["submission_id"]
+    app.state.store.events[submission_id].append({"submission_id": submission_id, "status": "reviewed"})
+    ticket = client.post(
+        "/api/v1/auth/sse-ticket",
+        headers=auth(student),
+        json={"submission_id": submission_id},
+    )
+    assert ticket.status_code == 200
+
+    events = client.get(
+        f"/api/v1/submissions/{submission_id}/events",
+        headers={"Last-Event-ID": "1"},
+        params={"sse_ticket": ticket.json()["data"]["ticket"], "follow": "false"},
+    )
+
+    assert events.status_code == 200
+    assert "id: 1" not in events.text
+    assert "id: 2" in events.text
+    assert '"status": "reviewed"' in events.text
 
 
 def test_logout_revokes_existing_token() -> None:
