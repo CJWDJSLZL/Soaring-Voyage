@@ -40,6 +40,24 @@ GitHub Actions 同样执行 Ruff、Mypy、PostgreSQL 迁移、Pytest 和 Harness
 .\.venv\Scripts\python.exe backend\scripts\demo_main_flow.py
 ```
 
+也可以用 Docker 启动带简单前端的演示服务：
+
+```powershell
+docker compose -f docker-compose.demo.yml up --build
+```
+
+如果本机 Docker 版本使用旧版 Compose 命令，也可以运行：
+
+```powershell
+docker-compose -f docker-compose.demo.yml up --build
+```
+
+启动后打开：
+
+```text
+http://127.0.0.1:8000/demo
+```
+
 脚本会依次演示：
 
 - 教师登录并创建题目

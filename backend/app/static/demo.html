@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>翱翔启航演示</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --line: #d8dee9;
+      --text: #162033;
+      --muted: #657083;
+      --primary: #2563eb;
+      --ok: #0f8b4c;
+      --warn: #a15c00;
+      --bad: #b42318;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    header {
+      padding: 18px 24px;
+      background: #172033;
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+    h1 { margin: 0; font-size: 22px; }
+    main { max-width: 1180px; margin: 0 auto; padding: 22px; }
+    .grid { display: grid; grid-template-columns: 360px 1fr; gap: 18px; align-items: start; }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+    }
+    h2 { margin: 0 0 12px; font-size: 18px; }
+    h3 { margin: 14px 0 8px; font-size: 15px; }
+    button {
+      width: 100%;
+      border: 0;
+      border-radius: 6px;
+      padding: 10px 12px;
+      margin: 6px 0;
+      background: var(--primary);
+      color: white;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    button.secondary { background: #334155; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    label { display: block; color: var(--muted); font-size: 13px; margin-top: 10px; }
+    input, textarea {
+      width: 100%;
+      margin-top: 4px;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      font: inherit;
+      background: white;
+    }
+    textarea { min-height: 76px; resize: vertical; }
+    .status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: #eef2ff;
+      color: #263a8b;
+      font-size: 13px;
+      font-weight: 650;
+    }
+    .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fbfcff;
+    }
+    .metric { font-size: 26px; font-weight: 750; margin: 6px 0 0; }
+    .muted { color: var(--muted); font-size: 13px; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .bad { color: var(--bad); }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #101827;
+      color: #d9e4ff;
+      border-radius: 8px;
+      padding: 12px;
+      max-height: 360px;
+      overflow: auto;
+      font-size: 12px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    @media (max-width: 860px) {
+      .grid { grid-template-columns: 1fr; }
+      .cards { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>翱翔启航演示台</h1>
+    <span class="status" id="status">未开始</span>
+  </header>
+  <main class="grid">
+    <section class="panel">
+      <h2>主流程操作</h2>
+      <button id="runAll">一键跑通主流程</button>
+      <button class="secondary" id="reset">重置页面状态</button>
+
+      <h3>学生提交答案</h3>
+      <label>普通批改答案
+        <input id="studentAnswer" value="362" maxlength="500" />
+      </label>
+      <label>人工复核演示答案
+        <input id="reviewAnswer" value="uncertain:17" maxlength="500" />
+      </label>
+
+      <h3>演示账号</h3>
+      <div class="muted">教师：teacher / Test@1234</div>
+      <div class="muted">学生：student / Test@1234</div>
+    </section>
+
+    <section class="panel">
+      <h2>演示结果</h2>
+      <div class="cards">
+        <div class="card">
+          <div class="muted">作业状态</div>
+          <div class="metric" id="assignmentState">-</div>
+        </div>
+        <div class="card">
+          <div class="muted">学生正确率</div>
+          <div class="metric" id="accuracy">-</div>
+        </div>
+        <div class="card">
+          <div class="muted">知识点提醒</div>
+          <div class="metric" id="alerts">-</div>
+        </div>
+        <div class="card">
+          <div class="muted">人工复核</div>
+          <div class="metric" id="reviewState">-</div>
+        </div>
+      </div>
+
+      <h3>作业列表</h3>
+      <table>
+        <thead><tr><th>角色</th><th>内容</th><th>状态</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+
+      <h3>最新 API 响应</h3>
+      <pre id="log">{}</pre>
+    </section>
+  </main>
+
+  <script>
+    const API = "/api/v1";
+    const state = {};
+    const el = (id) => document.getElementById(id);
+    const setStatus = (text) => { el("status").textContent = text; };
+    const show = (payload) => { el("log").textContent = JSON.stringify(payload, null, 2); };
+    const addRow = (role, content, status) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td>${role}</td><td>${content}</td><td>${status}</td>`;
+      el("rows").appendChild(tr);
+    };
+    async function api(path, options = {}, token) {
+      const headers = {"Content-Type": "application/json", ...(options.headers || {})};
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const response = await fetch(`${API}${path}`, {...options, headers});
+      const body = await response.json();
+      show(body);
+      if (!response.ok || body.code !== 0) {
+        throw new Error(body.message || `HTTP ${response.status}`);
+      }
+      return body.data;
+    }
+    async function login(username) {
+      const data = await api("/auth/login", {
+        method: "POST",
+        body: JSON.stringify({username, password: "Test@1234"})
+      });
+      addRow(username, "登录成功", data.user.role);
+      return data.access_token;
+    }
+    async function runAll() {
+      el("runAll").disabled = true;
+      el("rows").innerHTML = "";
+      try {
+        setStatus("登录中");
+        state.teacher = await login("teacher");
+        state.student = await login("student");
+
+        setStatus("教师创建题目");
+        const problem = await api("/problems/", {
+          method: "POST",
+          body: JSON.stringify({
+            problem_text: "325 + 47 = ___",
+            problem_type: "arithmetic",
+            reference_answer: "372",
+            grade_level: 3,
+            difficulty: "medium",
+            curriculum_version: "人教版",
+            solution_steps: ["个位 5+7=12，写2进1", "十位 2+4+1=7", "百位写3"],
+            tags: ["加法", "进位"]
+          })
+        }, state.teacher);
+        state.problemId = problem.problem_id;
+        addRow("教师", "创建三位数加法题", problem.problem_id);
+
+        setStatus("教师布置作业");
+        const assignment = await api("/assignments/", {
+          method: "POST",
+          body: JSON.stringify({
+            title: "演示作业：三位数加法",
+            class_ids: ["class-3a"],
+            due_date: new Date(Date.now() + 86400000).toISOString(),
+            problem_ids: [state.problemId]
+          })
+        }, state.teacher);
+        state.assignmentId = assignment.assignment_id;
+        el("assignmentState").textContent = assignment.status;
+        addRow("教师", assignment.title, assignment.status);
+
+        setStatus("学生查看作业");
+        const assignments = await api("/assignments/", {}, state.student);
+        addRow("学生", `看到 ${assignments.items.length} 个作业`, assignments.items[0]?.submission_status || "-");
+
+        setStatus("学生提交答案");
+        const submission = await api("/submissions/", {
+          method: "POST",
+          body: JSON.stringify({
+            assignment_id: state.assignmentId,
+            answers: [{problem_id: state.problemId, answer_text: el("studentAnswer").value}]
+          })
+        }, state.student);
+        state.submissionId = submission.submission_id;
+        el("accuracy").textContent = `${Math.round(submission.summary.accuracy * 100)}%`;
+        addRow("学生", submission.results[0].feedback_text, submission.status);
+
+        setStatus("教师查看统计");
+        const stats = await api(`/assignments/${state.assignmentId}/stats`, {}, state.teacher);
+        el("alerts").textContent = String(stats.knowledge_point_alerts.length);
+        addRow("教师", "查看作业统计", `提交 ${stats.submitted_count}`);
+
+        setStatus("人工复核演示");
+        const reviewProblem = await api("/problems/", {
+          method: "POST",
+          body: JSON.stringify({
+            problem_text: "9 + 8 = ___",
+            problem_type: "arithmetic",
+            reference_answer: "17",
+            grade_level: 3,
+            difficulty: "easy",
+            curriculum_version: "人教版",
+            tags: ["加法"]
+          })
+        }, state.teacher);
+        const reviewAssignment = await api("/assignments/", {
+          method: "POST",
+          body: JSON.stringify({
+            title: "演示作业：人工复核",
+            class_ids: ["class-3a"],
+            due_date: new Date(Date.now() + 86400000).toISOString(),
+            problem_ids: [reviewProblem.problem_id]
+          })
+        }, state.teacher);
+        await api("/submissions/", {
+          method: "POST",
+          body: JSON.stringify({
+            assignment_id: reviewAssignment.assignment_id,
+            answers: [{problem_id: reviewProblem.problem_id, answer_text: el("reviewAnswer").value}]
+          })
+        }, state.student);
+        const queue = await api("/teacher/human-review-queue", {}, state.teacher);
+        const reviewId = queue.items[0].review_id;
+        const reviewed = await api(`/teacher/human-review/${reviewId}`, {
+          method: "POST",
+          body: JSON.stringify({override_correct: true, reviewer_notes: "demo approved", is_training_example: true})
+        }, state.teacher);
+        el("reviewState").textContent = reviewed.status;
+        addRow("教师", "完成人工复核", reviewed.status);
+
+        setStatus("主流程已跑通");
+      } catch (error) {
+        setStatus(`失败：${error.message}`);
+      } finally {
+        el("runAll").disabled = false;
+      }
+    }
+    el("runAll").addEventListener("click", runAll);
+    el("reset").addEventListener("click", () => location.reload());
+  </script>
+</body>
+</html>

@@ -19,6 +19,7 @@ WORKDIR /app
 COPY --from=builder /opt/venv /opt/venv
 COPY --chown=app:app backend/app ./app
 COPY --chown=app:app backend/migrations ./migrations
+COPY --chown=app:app backend/scripts ./scripts
 USER app
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=45s --retries=3 \

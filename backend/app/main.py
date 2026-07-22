@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from pathlib import Path
 from time import monotonic
 from typing import Any
 from uuid import uuid4
@@ -9,7 +10,7 @@ from uuid import uuid4
 import asyncpg
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from redis.asyncio import Redis
 from starlette.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -28,6 +29,7 @@ from app.realtime import MemoryTicketRepository, RedisTicketRepository, TicketRe
 PoolFactory = Callable[[str], Awaitable[asyncpg.Pool]]
 RedisFactory = Callable[[str], Redis]
 QdrantIndexerFactory = Callable[[Settings], QdrantIndexer | None]
+DEMO_INDEX = Path(__file__).resolve().parent / "static" / "demo.html"
 
 
 def service_health(status: str, *, latency_ms: int | None = None, backend: str | None = None) -> dict[str, Any]:
@@ -234,6 +236,11 @@ def create_app(
             "grading": {"active_requests": 0, "pending_hitl_count": await pending_hitl_count(request, pool)},
         }
         return JSONResponse(status_code=status_code, content=body)
+
+    @application.get("/")
+    @application.get("/demo")
+    async def demo_frontend():
+        return FileResponse(DEMO_INDEX)
 
     application.include_router(router, prefix=configured.api_prefix)
     return application

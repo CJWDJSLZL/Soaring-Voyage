@@ -1,0 +1,26 @@
+name: soaring-voyage-demo
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: soaring-voyage-app:${APP_IMAGE_TAG:-demo}
+    restart: unless-stopped
+    environment:
+      APP_ENV: development
+      PERSISTENCE_BACKEND: memory
+      SECRET_KEY: ${SECRET_KEY:-phase1-development-secret-change-me}
+      API_PREFIX: /api/v1
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:8000,http://127.0.0.1:8000}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1}
+      USE_MOCK_LLM: "true"
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
