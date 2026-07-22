@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from app.harness.dataset import generate_cases, write_dataset
-from app.harness.runner import HarnessRunner, compute_metrics, load_cases
+from app.harness.runner import HarnessRunner, compute_metrics, load_cases, select_cases
 
 
 def test_generator_is_deterministic_and_exactly_180(tmp_path: Path) -> None:
@@ -46,5 +46,23 @@ def test_metrics_accuracy_fpr_fnr_and_coverage() -> None:
 def test_mock_runner_passes_full_dataset() -> None:
     report = HarnessRunner(use_mock=True).run(generate_cases())
     assert report.metrics.total == 180
+    assert report.metrics.coverage == 1.0
+    assert report.metrics.accuracy >= 0.94
+
+
+def test_select_cases_filters_grade_levels_and_samples_deterministically() -> None:
+    cases = generate_cases()
+    first = select_cases(cases, sample_rate=0.25, grade_levels=[2])
+    second = select_cases(cases, sample_rate=0.25, grade_levels=[2])
+
+    assert first == second
+    assert len(first) == 15
+    assert {case["grade"] for case in first} == {2}
+
+
+def test_runner_applies_requested_case_selection() -> None:
+    report = HarnessRunner(use_mock=True).run(generate_cases(), sample_rate=0.5, grade_levels=[1])
+
+    assert report.metrics.total == 30
     assert report.metrics.coverage == 1.0
     assert report.metrics.accuracy >= 0.94

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +68,28 @@ def compute_metrics(actual: Iterable[bool | None], expected: Iterable[bool]) -> 
     )
 
 
+def select_cases(
+    cases: Iterable[dict[str, Any]],
+    *,
+    sample_rate: float = 1.0,
+    grade_levels: Iterable[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Filter and deterministically sample harness cases."""
+    selected = list(cases)
+    grade_filter = set(grade_levels or [])
+    if grade_filter:
+        selected = [case for case in selected if int(case["grade"]) in grade_filter]
+    if not selected or sample_rate >= 1.0:
+        return selected
+    if sample_rate <= 0:
+        raise ValueError("sample_rate must be positive")
+    sample_size = max(1, math.ceil(len(selected) * sample_rate))
+    return sorted(
+        selected,
+        key=lambda case: sha256(str(case["id"]).encode("utf-8")).hexdigest(),
+    )[:sample_size]
+
+
 class HarnessRunner:
     def __init__(self, use_mock: bool = False) -> None:
         self.use_mock = use_mock
@@ -86,8 +110,15 @@ class HarnessRunner:
         )
         return self.engine.grade(request).is_correct
 
-    def run(self, source: str | Path | Iterable[dict[str, Any]]) -> HarnessReport:
+    def run(
+        self,
+        source: str | Path | Iterable[dict[str, Any]],
+        *,
+        sample_rate: float = 1.0,
+        grade_levels: Iterable[int] | None = None,
+    ) -> HarnessReport:
         cases = load_cases(source) if isinstance(source, (str, Path)) else list(source)
+        cases = select_cases(cases, sample_rate=sample_rate, grade_levels=grade_levels)
         predictions = [self._predict(case) for case in cases]
         expected = [bool(case["expected_correct"]) for case in cases]
         failures = tuple(

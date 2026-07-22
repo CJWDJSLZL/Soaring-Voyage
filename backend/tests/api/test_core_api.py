@@ -446,6 +446,18 @@ def test_admin_classes_stats_password_reset_and_ops_jobs(client: TestClient):
     assert harness_detail.json()["data"]["status"] == "completed"
     assert harness_detail.json()["data"]["accuracy"] >= 0.94
 
+    sampled_harness = client.post(
+        "/api/v1/ops/harness/run",
+        headers=auth(sysadmin),
+        json={"use_mock": True, "sample_rate": 0.5, "dataset": "all", "grade_levels": [1]},
+    )
+    assert sampled_harness.status_code == 202
+    assert sampled_harness.json()["data"]["total_cases"] == 30
+    sampled_run_id = sampled_harness.json()["data"]["run_id"]
+    sampled_detail = client.get(f"/api/v1/ops/harness/runs/{sampled_run_id}", headers=auth(sysadmin))
+    assert sampled_detail.status_code == 200
+    assert sampled_detail.json()["data"]["total_cases"] == 30
+
     rag = client.post(
         "/api/v1/ops/rag/ingest",
         headers=auth(sysadmin),

@@ -21,6 +21,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="AI grading regression harness")
     parser.add_argument("--dataset", type=Path, default=DEFAULT_DATASET)
     parser.add_argument("--mock", action="store_true", help="use deterministic local grader")
+    parser.add_argument("--sample-rate", type=float, default=1.0, help="deterministically sample this fraction")
+    parser.add_argument(
+        "--grade-level",
+        type=int,
+        action="append",
+        default=[],
+        help="restrict cases to a grade level; may be passed multiple times",
+    )
     parser.add_argument("--min-cases", type=int, default=180)
     parser.add_argument("--fail-below", type=float, default=0.94)
     parser.add_argument("--report-file", type=Path, help="write the JSON report to this path")
@@ -29,7 +37,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    report = HarnessRunner(use_mock=args.mock).run(args.dataset)
+    report = HarnessRunner(use_mock=args.mock).run(
+        args.dataset,
+        sample_rate=args.sample_rate,
+        grade_levels=args.grade_level,
+    )
     payload = report.as_dict()
     payload["threshold"] = args.fail_below
     payload["min_cases"] = args.min_cases

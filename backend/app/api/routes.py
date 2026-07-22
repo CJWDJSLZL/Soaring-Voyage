@@ -1095,7 +1095,15 @@ async def run_harness(
 ):
     if not payload.use_mock:
         raise AppError(503, 5002, "LLM 服务不可用", "真实 LLM Harness 仍需接入异步抽样执行器")
-    report = HarnessRunner(use_mock=True).run(HARNESS_DATASET).as_dict()
+    report = (
+        HarnessRunner(use_mock=True)
+        .run(
+            HARNESS_DATASET,
+            sample_rate=payload.sample_rate,
+            grade_levels=payload.grade_levels,
+        )
+        .as_dict()
+    )
     return envelope(request, await repository.run_harness(user, payload.model_dump(), report))
 
 
