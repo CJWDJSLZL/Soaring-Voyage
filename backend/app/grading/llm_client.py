@@ -117,6 +117,7 @@ class DeepSeekGradingClient:
             "grade": request.grade,
             "hint_level": request.hint_level,
             "solution_steps": request.solution_steps[:5],
+            "rag_context": request.rag_context[:2],
         }
         rendered = json.dumps(payload, ensure_ascii=False)
         if _UUID_RE.search(rendered):

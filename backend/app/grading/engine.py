@@ -22,6 +22,7 @@ class GradeRequest(BaseModel):
     grade: int = Field(ge=1, le=6)
     hint_level: int = Field(default=0, ge=0, le=3)
     solution_steps: list[str] = Field(default_factory=list, max_length=20)
+    rag_context: list[dict[str, str]] = Field(default_factory=list, max_length=2)
 
 
 class LLMVerdict(BaseModel):

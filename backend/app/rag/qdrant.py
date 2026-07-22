@@ -23,6 +23,8 @@ class QdrantClient(Protocol):
 
     async def upsert(self, collection_name: str, points: list[Any]) -> Any: ...
 
+    async def query_points(self, collection_name: str, **kwargs: Any) -> Any: ...
+
     async def close(self) -> None: ...
 
 
@@ -92,12 +94,50 @@ class QdrantIndexer:
                     "problem_type": problem.get("problem_type"),
                     "difficulty": problem.get("difficulty"),
                     "tags": list(problem.get("tags", []) or []),
+                    "problem_text": str(problem.get("problem_text", ""))[:500],
+                    "reference_answer": str(problem.get("reference_answer", ""))[:200],
                 },
             )
             for problem in problems
         ]
         await self._client.upsert(collection_name=self.config.collection, points=points)
         return len(points)
+
+    async def search_similar(
+        self,
+        tenant_id: str,
+        problem: JsonDict,
+        *,
+        limit: int = 2,
+        score_threshold: float = 0.85,
+    ) -> list[dict[str, str]]:
+        if limit <= 0:
+            return []
+        await self.ensure_collection()
+        models = import_module("qdrant_client.models")
+        query_filter = models.Filter(
+            must=[
+                models.FieldCondition(key="tenant_id", match=models.MatchValue(value=tenant_id)),
+            ]
+        )
+        response = await self._client.query_points(
+            collection_name=self.config.collection,
+            query=build_problem_vector(problem, size=self.config.vector_size),
+            query_filter=query_filter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+            score_threshold=score_threshold,
+        )
+        points = getattr(response, "points", response)
+        results: list[dict[str, str]] = []
+        for point in points:
+            payload = getattr(point, "payload", None) or {}
+            text = str(payload.get("problem_text") or "").strip()
+            answer = str(payload.get("reference_answer") or "").strip()
+            if text and answer:
+                results.append({"problem_text": text[:500], "reference_answer": answer[:200]})
+        return results[:limit]
 
     async def close(self) -> None:
         await self._client.close()

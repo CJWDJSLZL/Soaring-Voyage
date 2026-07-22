@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Iterable, Iterator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile
@@ -512,6 +512,7 @@ async def grade(
     raw_answer: str,
     llm_grader: DeepSeekGradingClient,
     hint_level: int = 0,
+    rag_indexer: Any | None = None,
 ) -> dict:
     """Grade through the shared deterministic/LLM-routing pipeline.
 
@@ -525,6 +526,23 @@ async def grade(
         "fill_in_blank": "fill_blank",
         "multiple_choice": "choice",
     }
+    rag_context: list[dict[str, str]] = []
+    if llm_grader.is_enabled and rag_indexer is not None:
+        try:
+            rag_context = await rag_indexer.search_similar(
+                str(problem["tenant_id"]),
+                {
+                    "problem_id": str(problem.get("problem_id", "")),
+                    "problem_text": problem["problem_text"],
+                    "reference_answer": problem["reference_answer"],
+                    "problem_type": problem["problem_type"],
+                    "grade_level": problem["grade_level"],
+                    "difficulty": problem.get("difficulty", ""),
+                    "tags": problem.get("tags", []),
+                },
+            )
+        except Exception:
+            rag_context = []
     grading_request = GradeRequest(
         question=problem["problem_text"],
         reference_answer=problem["reference_answer"],
@@ -533,6 +551,7 @@ async def grade(
         grade=problem["grade_level"],
         hint_level=hint_level,
         solution_steps=problem.get("solution_steps", []),
+        rag_context=rag_context,
     )
     llm_verdict: LLMVerdict | None
     if uncertain:
@@ -632,7 +651,7 @@ async def submit(
         data = await repository.submit_assignment(
             user,
             payload.model_dump(),
-            lambda problem, answer: grade(problem, answer, llm_grader),
+            lambda problem, answer: grade(problem, answer, llm_grader, rag_indexer=request.app.state.rag_indexer),
         )
         return envelope(request, data)
     assignment = get_assignment(store, payload.assignment_id)
@@ -658,7 +677,7 @@ async def submit(
             "problem_id": answer.problem_id,
             "sequence": assignment["problem_ids"].index(answer.problem_id) + 1,
             "problem_text": problem["problem_text"],
-            **await grade(problem, answer.answer_text, llm_grader),
+            **await grade(problem, answer.answer_text, llm_grader, rag_indexer=request.app.state.rag_indexer),
         }
         pending += int(result["routed_to_human"])
         results.append(result)
@@ -761,7 +780,9 @@ async def hint(
             user,
             submission_id,
             payload.model_dump(),
-            lambda problem, answer, hint_level: grade(problem, answer, llm_grader, hint_level),
+            lambda problem, answer, hint_level: grade(
+                problem, answer, llm_grader, hint_level, request.app.state.rag_indexer
+            ),
         )
         return envelope(request, data)
     submission = get_visible_submission(store, submission_id, user)
@@ -787,7 +808,15 @@ async def hint(
             review["status"] = "reviewed"
             review["resolution"] = "superseded"
             review["superseded_at"] = iso_now()
-    result.update(await grade(problem, payload.new_answer.strip(), llm_grader, previous_hint_level + 1))
+    result.update(
+        await grade(
+            problem,
+            payload.new_answer.strip(),
+            llm_grader,
+            previous_hint_level + 1,
+            request.app.state.rag_indexer,
+        )
+    )
     result["hint_level"] = previous_hint_level + 1
     result["attempt_number"] = previous_attempt_number + 1
     if result["show_full_solution"]:

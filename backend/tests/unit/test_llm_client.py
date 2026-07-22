@@ -82,3 +82,32 @@ async def test_uuid_like_payload_is_rejected_before_llm_call() -> None:
         await grader.verdict(request(question="题目 11111111-1111-4111-8111-111111111111"))
 
     create.assert_not_awaited()
+
+
+def test_safe_payload_includes_bounded_rag_context_and_rejects_uuid_like_context() -> None:
+    grader = DeepSeekGradingClient(config(), client=SimpleNamespace(close=AsyncMock()))
+    payload = grader._safe_payload(
+        request(
+            rag_context=[
+                {"problem_text": "2 + 2 = ___", "reference_answer": "4"},
+                {"problem_text": "3 + 3 = ___", "reference_answer": "6"},
+            ]
+        )
+    )
+
+    assert payload["rag_context"] == [
+        {"problem_text": "2 + 2 = ___", "reference_answer": "4"},
+        {"problem_text": "3 + 3 = ___", "reference_answer": "6"},
+    ]
+
+    with pytest.raises(ValueError, match="UUID-like"):
+        grader._safe_payload(
+            request(
+                rag_context=[
+                    {
+                        "problem_text": "11111111-1111-4111-8111-111111111111",
+                        "reference_answer": "4",
+                    }
+                ]
+            )
+        )
