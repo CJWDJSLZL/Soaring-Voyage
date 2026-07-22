@@ -18,6 +18,7 @@ from app.core.errors import AppError, trace_id
 from app.db.pool import create_pool
 from app.domain.memory import InMemoryRepository
 from app.domain.postgres import PostgresIdentityProblemRepository
+from app.grading import DeepSeekGradingClient, LLMClientConfig
 
 PoolFactory = Callable[[str], Awaitable[asyncpg.Pool]]
 
@@ -32,6 +33,7 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
         application.state.store = store
         application.state.pool = None
         application.state.identity_repository = store
+        application.state.llm_grader = DeepSeekGradingClient(LLMClientConfig.from_settings(configured))
         if configured.persistence_backend == "postgres":
             pool = await pool_factory(configured.database_url or "")
             application.state.pool = pool
@@ -44,6 +46,7 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
             pool = application.state.pool
             if pool is not None:
                 await pool.close()
+            await application.state.llm_grader.close()
 
     application = FastAPI(title="翱翔启航 API", version="1.0.0", lifespan=lifespan)
     # Preserve the established test/tooling contract that exposes the memory
@@ -53,6 +56,7 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
     application.state.store = store
     application.state.pool = None
     application.state.identity_repository = store
+    application.state.llm_grader = DeepSeekGradingClient(LLMClientConfig.from_settings(configured))
     application.add_middleware(TrustedHostMiddleware, allowed_hosts=list(configured.allowed_hosts))
     application.add_middleware(
         CORSMiddleware,
@@ -80,7 +84,7 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
                 content={
                     "code": 5003,
                     "message": "该工作流尚未迁移到 PostgreSQL",
-                    "detail": "当前 PostgreSQL 阶段仅支持认证和题库接口",
+                    "detail": "当前 PostgreSQL 阶段支持认证、题库、作业和首次提交；提示、SSE 与人工复核仍在迁移中",
                     "trace_id": request.state.trace_id,
                 },
             )
@@ -137,6 +141,7 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
                 "database": database_status,
                 "redis": "not-wired",
                 "qdrant": "not-wired",
+                "llm": request.app.state.llm_grader.health_status,
             },
         }
         return JSONResponse(status_code=status_code, content=body)

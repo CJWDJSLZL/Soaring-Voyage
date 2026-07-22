@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -539,7 +539,7 @@ class PostgresIdentityProblemRepository:
         self,
         user: User,
         payload: dict[str, Any],
-        grade_problem: Callable[[JsonDict, str], JsonDict],
+        grade_problem: Callable[[JsonDict, str], Awaitable[JsonDict]],
     ) -> JsonDict:
         assignment_id = self._uuid_text(payload["assignment_id"], "assignment_id")
         answer_by_problem = {
@@ -605,11 +605,12 @@ class PostgresIdentityProblemRepository:
                     "common_errors": self._json_value(row["common_errors"], []),
                     "tags": list(row["tags"] or []),
                 }
+                graded = await grade_problem(problem, str(answer_by_problem[problem_id]))
                 result = {
                     "problem_id": problem_id,
                     "sequence": int(row["position"]),
                     "problem_text": row["problem_text"],
-                    **grade_problem(problem, str(answer_by_problem[problem_id])),
+                    **graded,
                 }
                 await connection.execute(
                     """

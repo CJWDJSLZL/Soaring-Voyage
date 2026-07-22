@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -67,7 +67,7 @@ class IdentityProblemRepository(Protocol):
         self,
         user: User,
         payload: dict[str, Any],
-        grade_problem: Callable[[JsonDict, str], JsonDict],
+        grade_problem: Callable[[JsonDict, str], Awaitable[JsonDict]],
     ) -> JsonDict: ...
     async def list_submissions(
         self,

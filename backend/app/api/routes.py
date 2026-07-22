@@ -17,9 +17,9 @@ from app.core.errors import AppError, envelope, utcnow
 from app.core.security import create_access_token, hash_password, verify_password
 from app.domain.models import Ticket, User
 from app.domain.repository import IdentityProblemRepository, Repository
-from app.grading import GradeRequest, LLMVerdict, QuestionType, route_grade
+from app.grading import DeepSeekGradingClient, GradeRequest, LLMUnavailableError, LLMVerdict, QuestionType, route_grade
 
-from .dependencies import current_user, get_identity_repository, get_store, require_roles
+from .dependencies import current_user, get_identity_repository, get_llm_grader, get_store, require_roles
 from .schemas import (
     AssignmentCreate,
     AssignmentPatch,
@@ -397,7 +397,12 @@ def patch_assignment(
     )
 
 
-def grade(problem: dict, raw_answer: str, hint_level: int = 0) -> dict:
+async def grade(
+    problem: dict,
+    raw_answer: str,
+    llm_grader: DeepSeekGradingClient,
+    hint_level: int = 0,
+) -> dict:
     """Grade through the shared deterministic/LLM-routing pipeline.
 
     The ``uncertain:`` prefix is an offline development hook used to exercise the
@@ -419,14 +424,25 @@ def grade(problem: dict, raw_answer: str, hint_level: int = 0) -> dict:
         hint_level=hint_level,
         solution_steps=problem.get("solution_steps", []),
     )
-    deterministic = route_grade(grading_request)
-    routed = route_grade(
-        grading_request,
-        LLMVerdict(
+    llm_verdict: LLMVerdict | None
+    if uncertain:
+        deterministic = route_grade(grading_request)
+        llm_verdict = LLMVerdict(
             is_correct=deterministic.is_correct,
-            confidence=0.50 if uncertain else 0.98,
-        ),
-    )
+            confidence=0.50,
+        )
+    elif not llm_grader.is_enabled:
+        deterministic = route_grade(grading_request)
+        llm_verdict = LLMVerdict(
+            is_correct=deterministic.is_correct,
+            confidence=0.98,
+        )
+    else:
+        try:
+            llm_verdict = await llm_grader.verdict(grading_request)
+        except (LLMUnavailableError, ValueError):
+            llm_verdict = None
+    routed = route_grade(grading_request, llm_verdict)
     if uncertain:
         routed.confidence = 0.50
         routed.needs_review = True
@@ -500,12 +516,13 @@ async def submit(
     user: User = Depends(require_roles("student")),
     store: Repository = Depends(get_store),
     repository: IdentityProblemRepository = Depends(get_identity_repository),
+    llm_grader: DeepSeekGradingClient = Depends(get_llm_grader),
 ):
     if request.app.state.settings.persistence_backend == "postgres":
         data = await repository.submit_assignment(
             user,
             payload.model_dump(),
-            lambda problem, answer: grade(problem, answer),
+            lambda problem, answer: grade(problem, answer, llm_grader),
         )
         return envelope(request, data)
     assignment = get_assignment(store, payload.assignment_id)
@@ -531,7 +548,7 @@ async def submit(
             "problem_id": answer.problem_id,
             "sequence": assignment["problem_ids"].index(answer.problem_id) + 1,
             "problem_text": problem["problem_text"],
-            **grade(problem, answer.answer_text),
+            **await grade(problem, answer.answer_text, llm_grader),
         }
         pending += int(result["routed_to_human"])
         results.append(result)
@@ -620,12 +637,13 @@ async def submission_detail(
 
 
 @router.post("/submissions/{submission_id}/hint")
-def hint(
+async def hint(
     submission_id: str,
     payload: HintRequest,
     request: Request,
     user: User = Depends(require_roles("student")),
     store: Repository = Depends(get_store),
+    llm_grader: DeepSeekGradingClient = Depends(get_llm_grader),
 ):
     submission = get_visible_submission(store, submission_id, user)
     assignment = store.assignments[submission["assignment_id"]]
@@ -650,7 +668,7 @@ def hint(
             review["status"] = "reviewed"
             review["resolution"] = "superseded"
             review["superseded_at"] = iso_now()
-    result.update(grade(problem, payload.new_answer.strip(), previous_hint_level + 1))
+    result.update(await grade(problem, payload.new_answer.strip(), llm_grader, previous_hint_level + 1))
     result["hint_level"] = previous_hint_level + 1
     result["attempt_number"] = previous_attempt_number + 1
     if result["show_full_solution"]:

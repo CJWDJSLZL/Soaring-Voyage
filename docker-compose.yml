@@ -85,6 +85,12 @@ services:
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1}
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
       QIANWEN_API_KEY: ${QIANWEN_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.deepseek.com/v1}
+      LLM_PRIMARY_MODEL: ${LLM_PRIMARY_MODEL:-deepseek-v4-flash}
+      LLM_FALLBACK_MODEL: ${LLM_FALLBACK_MODEL:-deepseek-v4-pro}
+      MAX_LLM_RETRIES: ${MAX_LLM_RETRIES:-3}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-30}
+      USE_MOCK_LLM: ${USE_MOCK_LLM:-false}
       DEBUG: "false"
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       DB_MIN_SIZE: ${DB_MIN_SIZE:-5}

@@ -239,13 +239,8 @@ async def test_submit_assignment_persists_answer_grading_and_review_queue() -> N
     repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
     student = User(USER_ID, "student", "Student", b"hash", "student", TENANT, [CLASS_ID], 3)
 
-    result = await repository.submit_assignment(
-        student,
-        {
-            "assignment_id": ASSIGNMENT_ID,
-            "answers": [{"problem_id": PROBLEM_ID, "answer_text": "uncertain:2"}],
-        },
-        lambda _problem, answer: {
+    async def grade_problem(_problem, answer):
+        return {
             "student_answer": answer,
             "is_correct": None,
             "confidence_score": 0.5,
@@ -258,7 +253,15 @@ async def test_submit_assignment_persists_answer_grading_and_review_queue() -> N
             "routed_to_human": True,
             "grading_source": "pending_human_review",
             "agent_trace": [{"node": "router"}],
+        }
+
+    result = await repository.submit_assignment(
+        student,
+        {
+            "assignment_id": ASSIGNMENT_ID,
+            "answers": [{"problem_id": PROBLEM_ID, "answer_text": "uncertain:2"}],
         },
+        grade_problem,
     )
 
     executed_sql = "\n".join(call.args[0] for call in connection.execute.await_args_list)
