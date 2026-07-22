@@ -923,6 +923,7 @@ async def review_queue(
     request: Request,
     response: Response,
     status: Literal["pending", "reviewed", "all"] = "pending",
+    class_id: str | None = None,
     page_number: int = Query(1, alias="page", ge=1),
     page_size: int = Query(20, ge=1, le=100),
     user: User = Depends(require_roles("teacher", "admin")),
@@ -933,17 +934,25 @@ async def review_queue(
         data, pending_count = await repository.list_human_reviews(
             user,
             status=status,
+            class_id=class_id,
             page_number=page_number,
             page_size=page_size,
         )
         response.headers["X-Pending-Review-Count"] = str(pending_count)
         return envelope(request, data)
+    if class_id is not None:
+        if class_id not in store.known_class_ids(user.tenant_id):
+            raise AppError(404, 4004, "班级不存在")
+        if user.role == "teacher" and class_id not in user.class_ids:
+            raise AppError(403, 4003, "权限不足")
     visible_reviews = []
     for review in store.reviews.values():
         submission = store.submissions[review["submission_id"]]
         if review["tenant_id"] != user.tenant_id or (
             user.role == "teacher" and not can_access_submission(user, submission)
         ):
+            continue
+        if class_id is not None and class_id not in submission["class_ids"]:
             continue
         visible_reviews.append(review)
     reviews = [review for review in visible_reviews if status == "all" or review["status"] == status]

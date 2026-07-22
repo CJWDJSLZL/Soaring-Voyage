@@ -105,6 +105,7 @@ class IdentityProblemRepository(Protocol):
         user: User,
         *,
         status: str,
+        class_id: str | None,
         page_number: int,
         page_size: int,
     ) -> tuple[JsonDict, int]: ...

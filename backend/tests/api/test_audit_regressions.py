@@ -305,3 +305,31 @@ def test_pending_review_header_is_independent_of_status_filter(client: TestClien
     assert response.status_code == 200
     assert response.headers["X-Pending-Review-Count"] == "1"
     assert response.json()["data"]["items"] == []
+
+
+def test_human_review_queue_filters_by_class_id(client: TestClient) -> None:
+    admin = login(client, "admin")
+    teacher = login(client, "teacher")
+    student = login(client, "student")
+    student2 = login(client, "student2")
+    problem_a = create_problem(client, admin)
+    problem_b = create_problem(client, admin)
+    assignment_a = create_assignment(client, admin, [problem_a], class_ids=["class-3a"], title="A班审核")
+    assignment_b = create_assignment(client, admin, [problem_b], class_ids=["class-3b"], title="B班审核")
+    submit(client, student, assignment_a, [{"problem_id": problem_a, "answer_text": "uncertain:1"}])
+    submit(client, student2, assignment_b, [{"problem_id": problem_b, "answer_text": "uncertain:1"}])
+
+    filtered_a = client.get("/api/v1/teacher/human-review-queue?class_id=class-3a", headers=auth(admin))
+    filtered_b = client.get("/api/v1/teacher/human-review-queue?class_id=class-3b", headers=auth(admin))
+    teacher_forbidden = client.get("/api/v1/teacher/human-review-queue?class_id=class-3b", headers=auth(teacher))
+    teacher_visible = client.get("/api/v1/teacher/human-review-queue?class_id=class-3a", headers=auth(teacher))
+
+    assert filtered_a.status_code == 200
+    assert filtered_a.headers["X-Pending-Review-Count"] == "1"
+    assert [item["assignment_title"] for item in filtered_a.json()["data"]["items"]] == ["A班审核"]
+    assert filtered_b.status_code == 200
+    assert filtered_b.headers["X-Pending-Review-Count"] == "1"
+    assert [item["assignment_title"] for item in filtered_b.json()["data"]["items"]] == ["B班审核"]
+    assert teacher_forbidden.status_code == 403
+    assert teacher_visible.status_code == 200
+    assert [item["assignment_title"] for item in teacher_visible.json()["data"]["items"]] == ["A班审核"]

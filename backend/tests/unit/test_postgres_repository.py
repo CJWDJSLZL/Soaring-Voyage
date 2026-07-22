@@ -609,6 +609,57 @@ async def test_assignment_export_returns_problem_stats_and_student_rows() -> Non
 
 
 @pytest.mark.asyncio
+async def test_list_human_reviews_accepts_class_filter() -> None:
+    connection = AsyncMock()
+    review_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    submission_id = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+    grading_id = UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+    connection.fetch.return_value = [
+        {
+            "review_id": review_id,
+            "tenant_id": UUID(TENANT),
+            "reason": "low_confidence",
+            "status": "pending",
+            "created_at": datetime(2026, 7, 22, tzinfo=UTC),
+            "reviewer_notes": None,
+            "is_training_example": False,
+            "grading_result_id": grading_id,
+            "submission_id": submission_id,
+            "problem_id": UUID(PROBLEM_ID),
+            "is_correct": None,
+            "confidence_score": 0.5,
+            "agent_trace": [],
+            "student_answer": "uncertain",
+            "student_id": UUID("44444444-4444-4444-8444-444444444444"),
+            "student_name": "Student",
+            "assignment_title": "Class A Review",
+            "problem_text": "1 + 1 = ___",
+            "problem_type": "arithmetic",
+            "reference_answer": "2",
+            "class_names": ["Class A"],
+            "class_ids": [UUID(CLASS_ID)],
+        }
+    ]
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    admin = PostgresIdentityProblemRepository.user_from_row(user_row(role="admin", class_ids=[]))
+
+    data, pending_count = await repository.list_human_reviews(
+        admin,
+        status="pending",
+        class_id=CLASS_ID,
+        page_number=1,
+        page_size=20,
+    )
+
+    sql, tenant_arg, review_arg, class_arg = connection.fetch.await_args.args
+    assert "ac.class_id = $3::uuid" in sql
+    assert (tenant_arg, review_arg, class_arg) == (TENANT, None, CLASS_ID)
+    assert pending_count == 1
+    assert data["items"][0]["review_id"] == str(review_id)
+    assert data["items"][0]["assignment_title"] == "Class A Review"
+
+
+@pytest.mark.asyncio
 async def test_update_user_status_toggles_soft_delete_token_and_audit() -> None:
     connection = AsyncMock()
     target_id = UUID("44444444-4444-4444-8444-444444444444")

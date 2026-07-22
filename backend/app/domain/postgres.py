@@ -1975,7 +1975,14 @@ class PostgresIdentityProblemRepository:
             "is_training_example": row["is_training_example"],
         }
 
-    async def _review_rows(self, connection: asyncpg.Connection, user: User, *, review_id: str | None = None) -> list:
+    async def _review_rows(
+        self,
+        connection: asyncpg.Connection,
+        user: User,
+        *,
+        review_id: str | None = None,
+        class_id: str | None = None,
+    ) -> list:
         rows = await connection.fetch(
             """
             SELECT hrq.id AS review_id, hrq.tenant_id, hrq.reason, hrq.status, hrq.created_at,
@@ -2000,9 +2007,11 @@ class PostgresIdentityProblemRepository:
             JOIN users u ON u.tenant_id = s.tenant_id AND u.id = s.student_id
             JOIN assignments a ON a.tenant_id = s.tenant_id AND a.id = s.assignment_id
             JOIN assignment_classes ac ON ac.tenant_id = s.tenant_id AND ac.assignment_id = s.assignment_id
-            JOIN classes c ON c.tenant_id = ac.tenant_id AND c.id = ac.class_id
+            JOIN classes c ON c.tenant_id = ac.tenant_id AND c.id = ac.class_id AND NOT c.is_deleted
             JOIN problems p ON p.id = gr.problem_id
-            WHERE hrq.tenant_id = $1 AND ($2::uuid IS NULL OR hrq.id = $2::uuid)
+            WHERE hrq.tenant_id = $1
+              AND ($2::uuid IS NULL OR hrq.id = $2::uuid)
+              AND ($3::uuid IS NULL OR ac.class_id = $3::uuid)
             GROUP BY hrq.id, hrq.tenant_id, hrq.reason, hrq.status, hrq.created_at,
                      hrq.reviewer_notes, hrq.is_training_example, gr.id, gr.submission_id,
                      gr.problem_id, gr.is_correct, gr.confidence_score, gr.agent_trace,
@@ -2012,6 +2021,7 @@ class PostgresIdentityProblemRepository:
             """,
             user.tenant_id,
             review_id,
+            class_id,
         )
         visible = []
         for row in rows:
@@ -2025,11 +2035,13 @@ class PostgresIdentityProblemRepository:
         user: User,
         *,
         status: str,
+        class_id: str | None,
         page_number: int,
         page_size: int,
     ) -> tuple[JsonDict, int]:
+        normalized_class_id = self._uuid_text(class_id, "class_id") if class_id else None
         async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
-            rows = await self._review_rows(connection, user)
+            rows = await self._review_rows(connection, user, class_id=normalized_class_id)
         pending_count = sum(row["status"] == "pending" for row in rows)
         filtered = [row for row in rows if status == "all" or row["status"] == status]
         return self._page([self._public_review(row) for row in filtered], page_number, page_size), pending_count
