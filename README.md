@@ -32,6 +32,24 @@ make migrate       # 手动应用待执行迁移（需要 DATABASE_URL）
 
 GitHub Actions 同样执行 Ruff、Mypy、PostgreSQL 迁移、Pytest 和 Harness 94% 门禁，并上传覆盖率与 Harness 报告。
 
+## 本地演示主流程
+
+不依赖 PostgreSQL、Redis、Qdrant 或真实 LLM，可以直接用开发内存适配器跑通教师和学生主链路：
+
+```powershell
+.\.venv\Scripts\python.exe backend\scripts\demo_main_flow.py
+```
+
+脚本会依次演示：
+
+- 教师登录并创建题目
+- 教师布置作业到 `class-3a`
+- 学生看到作业并提交答案
+- 系统返回自动批改结果
+- 教师查看作业统计和知识点提醒
+- 低置信度答案进入人工复核队列
+- 教师完成 HITL 复核
+
 ## 数据库与租户隔离
 
 - 初始迁移创建 tenants、users、classes、class_students、problems、assignments、assignment_classes、assignment_problems、submissions、submission_answers、grading_results、human_review_queue、student_error_history、harness_runs、jobs、audit_logs。
