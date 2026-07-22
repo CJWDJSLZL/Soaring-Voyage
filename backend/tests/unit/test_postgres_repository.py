@@ -493,3 +493,64 @@ async def test_student_analytics_checks_teacher_visibility_and_aggregates_result
     assert analytics["hint_usage"]["hint_dependency_rate"] == 0.4
     assert analytics["error_type_breakdown"] == {"calculation_error": 2}
     assert analytics["weak_knowledge_points"][0]["point"] == "addition"
+
+
+@pytest.mark.asyncio
+async def test_assignment_export_returns_problem_stats_and_student_rows() -> None:
+    connection = AsyncMock()
+    connection.fetchrow.return_value = {
+        "id": UUID(ASSIGNMENT_ID),
+        "title": "Assignment",
+        "due_date": None,
+        "class_ids": [UUID(CLASS_ID)],
+    }
+    connection.fetch.return_value = [
+        {
+            "submission_id": UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            "student_id": UUID("44444444-4444-4444-8444-444444444444"),
+            "student_name": "Student",
+            "status": "graded",
+            "submitted_at": datetime(2026, 7, 21, 8, tzinfo=UTC),
+            "problem_id": UUID(PROBLEM_ID),
+            "position": 1,
+            "problem_text": "1 + 1 = ___",
+            "answer_text": "3",
+            "is_correct": False,
+            "error_type": "calculation_error",
+            "hint_level": 1,
+            "attempt_number": 2,
+            "confidence_score": 0.9,
+            "routed_to_human": False,
+        }
+    ]
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    repository.assignment_stats = AsyncMock(  # type: ignore[method-assign]
+        return_value={
+            "problem_stats": [
+                {
+                    "problem_id": PROBLEM_ID,
+                    "sequence": 1,
+                    "problem_text": "1 + 1 = ___",
+                    "total_attempts": 2,
+                    "correct_first_try": 0,
+                    "correct_after_hint": 0,
+                    "still_wrong": 1,
+                    "pending_review": 0,
+                    "accuracy_first_try": 0.0,
+                    "top_error_types": [{"error_type": "calculation_error", "count": 1, "percentage": 1.0}],
+                    "avg_hint_used": 1.0,
+                }
+            ]
+        }
+    )
+    teacher = PostgresIdentityProblemRepository.user_from_row(user_row())
+
+    exported = await repository.assignment_export(teacher, ASSIGNMENT_ID)
+
+    assert exported["title"] == "Assignment"
+    assert exported["problem_stats"][0]["problem_id"] == PROBLEM_ID
+    assert exported["student_rows"][0]["student_name"] == "Student"
+    assert exported["student_rows"][0]["results"][0]["student_answer"] == "3"
+    sql = connection.fetch.await_args.args[0]
+    assert "DISTINCT ON (gr.submission_id, gr.problem_id)" in sql
+    assert "assignment_problems" in sql

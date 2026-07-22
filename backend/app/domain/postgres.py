@@ -1806,6 +1806,83 @@ class PostgresIdentityProblemRepository:
             "error_type_breakdown": {row["error_type"]: int(row["count"]) for row in error_rows},
         }
 
+    async def assignment_export(self, user: User, assignment_id: str) -> JsonDict:
+        normalized_assignment_id = self._uuid_text(assignment_id, "assignment_id")
+        stats = await self.assignment_stats(user, normalized_assignment_id)
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            assignment = await self._visible_assignment(connection, user, normalized_assignment_id)
+            rows = await connection.fetch(
+                """
+                WITH latest AS (
+                    SELECT DISTINCT ON (gr.submission_id, gr.problem_id)
+                           gr.submission_id, gr.problem_id, gr.attempt_number, gr.is_correct,
+                           gr.confidence_score, gr.error_type, gr.routed_to_human,
+                           sa.answer_text, sa.hint_level,
+                           p.problem_text, ap.position
+                    FROM grading_results gr
+                    JOIN submissions s ON s.tenant_id = gr.tenant_id AND s.id = gr.submission_id
+                    JOIN submission_answers sa
+                      ON sa.tenant_id = gr.tenant_id
+                     AND sa.submission_id = gr.submission_id
+                     AND sa.problem_id = gr.problem_id
+                     AND sa.attempt_number = gr.attempt_number
+                    JOIN problems p ON p.tenant_id = gr.tenant_id AND p.id = gr.problem_id
+                    JOIN assignment_problems ap
+                      ON ap.tenant_id = gr.tenant_id
+                     AND ap.assignment_id = s.assignment_id
+                     AND ap.problem_id = gr.problem_id
+                    WHERE gr.tenant_id = $1 AND s.assignment_id = $2
+                    ORDER BY gr.submission_id, gr.problem_id, gr.attempt_number DESC
+                )
+                SELECT s.id AS submission_id, s.student_id, u.display_name AS student_name,
+                       s.status, s.submitted_at,
+                       l.problem_id, l.position, l.problem_text, l.answer_text,
+                       l.is_correct, l.error_type, l.hint_level, l.attempt_number,
+                       l.confidence_score, l.routed_to_human
+                FROM submissions s
+                JOIN users u ON u.tenant_id = s.tenant_id AND u.id = s.student_id
+                JOIN latest l ON l.submission_id = s.id
+                WHERE s.tenant_id = $1 AND s.assignment_id = $2
+                ORDER BY u.display_name, s.submitted_at, l.position
+                """,
+                user.tenant_id,
+                normalized_assignment_id,
+            )
+        student_by_submission: dict[str, JsonDict] = {}
+        for row in rows:
+            submission_id = str(row["submission_id"])
+            submission = student_by_submission.setdefault(
+                submission_id,
+                {
+                    "student_id": str(row["student_id"]),
+                    "student_name": row["student_name"],
+                    "submission_id": submission_id,
+                    "status": row["status"],
+                    "submitted_at": row["submitted_at"].isoformat(),
+                    "results": [],
+                },
+            )
+            submission["results"].append(
+                {
+                    "sequence": int(row["position"]),
+                    "problem_id": str(row["problem_id"]),
+                    "problem_text": row["problem_text"],
+                    "student_answer": row["answer_text"],
+                    "is_correct": row["is_correct"],
+                    "error_type": row["error_type"],
+                    "hint_level": int(row["hint_level"] or 0),
+                    "attempt_number": int(row["attempt_number"] or 1),
+                    "confidence_score": float(row["confidence_score"] or 0),
+                    "routed_to_human": bool(row["routed_to_human"]),
+                }
+            )
+        return {
+            "assignment_id": normalized_assignment_id,
+            "title": assignment["title"],
+            "problem_stats": stats["problem_stats"],
+            "student_rows": list(student_by_submission.values()),
+        }
+
     @staticmethod
     def _empty_teacher_dashboard(class_name: str, days: int, cutoff: datetime) -> JsonDict:
         return {

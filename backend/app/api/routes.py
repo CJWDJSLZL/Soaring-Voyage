@@ -17,6 +17,7 @@ from app.core.errors import AppError, envelope, utcnow
 from app.core.security import create_access_token, hash_password, verify_password
 from app.domain.models import Ticket, User
 from app.domain.repository import IdentityProblemRepository, Repository
+from app.exports import XLSX_MEDIA_TYPE, assignment_export_filename, build_assignment_report_xlsx
 from app.grading import DeepSeekGradingClient, GradeRequest, LLMUnavailableError, LLMVerdict, QuestionType, route_grade
 from app.harness import HarnessRunner
 from app.imports import parse_problem_import, parse_student_import
@@ -842,6 +843,22 @@ async def student_analytics(
     repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
     return envelope(request, await repository.student_analytics(user, student_id, days=days))
+
+
+@router.get("/teacher/export/assignment/{assignment_id}")
+async def export_assignment(
+    assignment_id: str,
+    format: Literal["excel"] = "excel",
+    user: User = Depends(require_roles("teacher", "admin", "sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    report = await repository.assignment_export(user, assignment_id)
+    filename = assignment_export_filename(assignment_id)
+    return Response(
+        content=build_assignment_report_xlsx(report),
+        media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @router.get("/teacher/human-review-queue")

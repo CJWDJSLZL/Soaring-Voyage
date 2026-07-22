@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import zipfile
 from datetime import UTC, datetime, timedelta
 
 import jwt
@@ -224,6 +226,36 @@ def test_teacher_dashboard_and_student_analytics(client: TestClient):
     assert forbidden.status_code == 403
     admin_view = client.get("/api/v1/teacher/students/user-student/analytics", headers=auth(admin))
     assert admin_view.status_code == 200
+
+
+def test_teacher_exports_assignment_excel_report(client: TestClient):
+    teacher = login(client, "teacher")
+    student = login(client, "student")
+    problem_id, assignment_id = make_problem_and_assignment(client, teacher)
+    submitted = client.post(
+        "/api/v1/submissions/",
+        headers=auth(student),
+        json={"assignment_id": assignment_id, "answers": [{"problem_id": problem_id, "answer_text": "371"}]},
+    )
+    assert submitted.status_code == 201, submitted.text
+
+    denied = client.get(f"/api/v1/teacher/export/assignment/{assignment_id}", headers=auth(student))
+    assert denied.status_code == 403
+
+    exported = client.get(f"/api/v1/teacher/export/assignment/{assignment_id}?format=excel", headers=auth(teacher))
+
+    assert exported.status_code == 200, exported.text
+    assert exported.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert "assignment_report_" in exported.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as workbook:
+        assert "xl/worksheets/sheet1.xml" in workbook.namelist()
+        assert "xl/worksheets/sheet2.xml" in workbook.namelist()
+        sheet1 = workbook.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        sheet2 = workbook.read("xl/worksheets/sheet2.xml").decode("utf-8")
+    assert problem_id in sheet1
+    assert "user-student" in sheet2
 
 
 def test_hitl_review_and_one_time_sse_ticket(client: TestClient):

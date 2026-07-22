@@ -691,6 +691,54 @@ class InMemoryRepository:
             "error_type_breakdown": self._error_distribution(latest_results),
         }
 
+    async def assignment_export(self, user: User, assignment_id: str) -> JsonDict:
+        stats = await self.assignment_stats(user, assignment_id)
+        assignment = self.assignments[assignment_id]
+        class_ids = set(assignment["class_ids"])
+        student_rows = []
+        for submission in sorted(
+            self.submissions.values(), key=lambda item: (str(item["submitted_at"]), str(item["student_id"]))
+        ):
+            if (
+                submission["tenant_id"] != user.tenant_id
+                or submission["assignment_id"] != assignment_id
+                or not bool(set(submission["class_ids"]) & class_ids)
+            ):
+                continue
+            if user.role == "teacher" and not bool(set(user.class_ids) & set(submission["class_ids"])):
+                continue
+            student = self.user_by_id(submission["student_id"])
+            student_rows.append(
+                {
+                    "student_id": submission["student_id"],
+                    "student_name": student.display_name if student else submission["student_id"],
+                    "submission_id": submission["submission_id"],
+                    "status": submission["status"],
+                    "submitted_at": submission["submitted_at"],
+                    "results": [
+                        {
+                            "sequence": result["sequence"],
+                            "problem_id": result["problem_id"],
+                            "problem_text": result["problem_text"],
+                            "student_answer": result["student_answer"],
+                            "is_correct": result["is_correct"],
+                            "error_type": result.get("error_type"),
+                            "hint_level": result.get("hint_level", 0),
+                            "attempt_number": result.get("attempt_number", 1),
+                            "confidence_score": result.get("confidence_score", 0),
+                            "routed_to_human": result.get("routed_to_human", False),
+                        }
+                        for result in submission["results"]
+                    ],
+                }
+            )
+        return {
+            "assignment_id": assignment_id,
+            "title": assignment["title"],
+            "problem_stats": stats["problem_stats"],
+            "student_rows": student_rows,
+        }
+
     @staticmethod
     def _as_datetime(value: str) -> datetime:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
