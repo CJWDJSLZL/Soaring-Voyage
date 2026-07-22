@@ -326,10 +326,14 @@ def test_teacher_exports_assignment_excel_report(client: TestClient):
     with zipfile.ZipFile(io.BytesIO(exported.content)) as workbook:
         assert "xl/worksheets/sheet1.xml" in workbook.namelist()
         assert "xl/worksheets/sheet2.xml" in workbook.namelist()
+        assert "xl/worksheets/sheet3.xml" in workbook.namelist()
         sheet1 = workbook.read("xl/worksheets/sheet1.xml").decode("utf-8")
         sheet2 = workbook.read("xl/worksheets/sheet2.xml").decode("utf-8")
+        sheet3 = workbook.read("xl/worksheets/sheet3.xml").decode("utf-8")
     assert problem_id in sheet1
     assert "user-student" in sheet2
+    assert "section" in sheet3
+    assert "error_distribution" in sheet3
 
 
 def test_hitl_review_and_one_time_sse_ticket(client: TestClient):

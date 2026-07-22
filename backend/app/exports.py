@@ -92,9 +92,28 @@ def build_assignment_report_xlsx(report: JsonDict) -> bytes:
                 ]
             )
 
+    summary_rows = [["section", "name", "count", "rate", "affected_student_count", "alert_level", "alert"]]
+    for error_type, count in sorted((report.get("error_distribution") or {}).items()):
+        summary_rows.append(["error_distribution", error_type, count, "", "", "", ""])
+    for item in report.get("knowledge_point_alerts") or []:
+        summary_rows.append(
+            [
+                "knowledge_point_alert",
+                item["knowledge_point"],
+                "",
+                item["error_rate"],
+                item["affected_student_count"],
+                item["alert_level"],
+                item["alert"],
+            ]
+        )
+    if len(summary_rows) == 1:
+        summary_rows.append(["none", "", "", "", "", "", ""])
+
     sheets = [
         ("题目维度", problem_rows),
         ("学生维度", student_rows),
+        ("summary_alerts", summary_rows),
     ]
     return _build_xlsx(sheets)
 
