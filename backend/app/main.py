@@ -67,13 +67,13 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
         supplied = request.headers.get("X-Trace-ID", "")
         request.state.trace_id = supplied if supplied.startswith("req-") else f"req-{uuid4()}"
         path = request.url.path
-        unported_prefixes = (
-            f"{configured.api_prefix}/submissions",
-            f"{configured.api_prefix}/teacher/human-review",
-        )
+        unported_prefixes = (f"{configured.api_prefix}/teacher/human-review",)
         unported_exact = {f"{configured.api_prefix}/auth/sse-ticket"}
+        unported_submission_suffixes = ("/hint", "/events")
         if configured.persistence_backend == "postgres" and (
-            path.startswith(unported_prefixes) or path in unported_exact
+            path.startswith(unported_prefixes)
+            or path in unported_exact
+            or any(path.endswith(suffix) for suffix in unported_submission_suffixes)
         ):
             response = JSONResponse(
                 status_code=503,

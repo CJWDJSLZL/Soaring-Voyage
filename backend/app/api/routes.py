@@ -494,12 +494,20 @@ def add_pending_review(store: Repository, submission: dict, result: dict, user: 
 
 
 @router.post("/submissions/", status_code=201)
-def submit(
+async def submit(
     payload: SubmissionCreate,
     request: Request,
     user: User = Depends(require_roles("student")),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        data = await repository.submit_assignment(
+            user,
+            payload.model_dump(),
+            lambda problem, answer: grade(problem, answer),
+        )
+        return envelope(request, data)
     assignment = get_assignment(store, payload.assignment_id)
     if not can_access_assignment(user, assignment):
         raise AppError(403, 4003, "该作业不属于你所在的班级")
@@ -559,7 +567,7 @@ def submit(
 
 
 @router.get("/submissions/")
-def list_submissions(
+async def list_submissions(
     request: Request,
     student_id: str | None = None,
     assignment_id: str | None = None,
@@ -567,7 +575,17 @@ def list_submissions(
     page_size: int = Query(20, ge=1, le=100),
     user: User = Depends(current_user),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        data = await repository.list_submissions(
+            user,
+            student_id=student_id,
+            assignment_id=assignment_id,
+            page_number=page_number,
+            page_size=page_size,
+        )
+        return envelope(request, data)
     if user.role == "student":
         student_id = user.user_id
     elif user.role not in {"teacher", "admin", "sysadmin"}:
@@ -589,12 +607,15 @@ def list_submissions(
 
 
 @router.get("/submissions/{submission_id}")
-def submission_detail(
+async def submission_detail(
     submission_id: str,
     request: Request,
     user: User = Depends(current_user),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        return envelope(request, await repository.submission_detail(user, submission_id))
     return envelope(request, public_submission(get_visible_submission(store, submission_id, user)))
 
 

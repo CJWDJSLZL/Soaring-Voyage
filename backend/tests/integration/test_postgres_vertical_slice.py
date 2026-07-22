@@ -199,8 +199,48 @@ async def test_runtime_role_rls_identity_token_version_and_problem_persistence()
                 headers=student_auth,
                 json={"assignment_id": assignment_id, "answers": [{"problem_id": api_problem_id, "answer_text": "4"}]},
             )
-            assert submission.status_code == 503
-            assert submission.json()["code"] == 5003
+            assert submission.status_code == 201
+            submission_data = submission.json()["data"]
+            assert submission_data["status"] == "graded"
+            assert submission_data["summary"] == {
+                "total": 1,
+                "correct": 1,
+                "wrong": 0,
+                "pending_review": 0,
+                "accuracy": 1.0,
+            }
+            assert submission_data["results"][0]["is_correct"] is True
+            assert "agent_trace" not in submission_data["results"][0]
+
+            duplicate = client.post(
+                "/api/v1/submissions/",
+                headers=student_auth,
+                json={"assignment_id": assignment_id, "answers": [{"problem_id": api_problem_id, "answer_text": "4"}]},
+            )
+            assert duplicate.status_code == 409
+            assert duplicate.json()["code"] == 4005
+
+            refreshed_detail = client.get(f"/api/v1/assignments/{assignment_id}", headers=student_auth)
+            assert refreshed_detail.status_code == 200
+            assert refreshed_detail.json()["data"]["my_submission"]["submission_id"] == submission_data["submission_id"]
+            submission_detail = client.get(
+                f"/api/v1/submissions/{submission_data['submission_id']}",
+                headers=student_auth,
+            )
+            assert submission_detail.status_code == 200
+            assert submission_detail.json()["data"]["results"][0]["student_answer"] == "4"
+            listed_submissions = client.get("/api/v1/submissions/", headers=student_auth)
+            assert listed_submissions.status_code == 200
+            assert submission_data["submission_id"] in {
+                item["submission_id"] for item in listed_submissions.json()["data"]["items"]
+            }
+            hint = client.post(
+                f"/api/v1/submissions/{submission_data['submission_id']}/hint",
+                headers=student_auth,
+                json={"problem_id": api_problem_id, "new_answer": "4"},
+            )
+            assert hint.status_code == 503
+            assert hint.json()["code"] == 5003
 
         other_tenant = str(uuid4())
         with tenant_context(other_tenant, "worker"):

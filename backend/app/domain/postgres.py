@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -284,6 +284,23 @@ class PostgresIdentityProblemRepository:
         due = due_date if due_date.tzinfo else due_date.replace(tzinfo=UTC)
         return "expired" if due <= datetime.now(UTC) else "active"
 
+    @staticmethod
+    def _public_submission(submission: JsonDict) -> JsonDict:
+        keys = ("submission_id", "status", "submitted_at", "results", "summary", "last_updated_at")
+        public = {key: submission[key] for key in keys if key in submission}
+        if "results" in public:
+            public["results"] = [
+                {key: value for key, value in result.items() if key != "agent_trace"} for result in public["results"]
+            ]
+        return public
+
+    @staticmethod
+    def _uuid_text(value: Any, field: str) -> str:
+        try:
+            return str(UUID(str(value)))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise AppError(422, 4022, "请求参数校验失败", f"{field} must be a valid UUID") from exc
+
     async def create_assignment(self, user: User, payload: dict[str, Any]) -> JsonDict:
         class_ids = list(payload["class_ids"])
         problem_ids = list(payload["problem_ids"])
@@ -492,3 +509,323 @@ class PostgresIdentityProblemRepository:
                 else None
             )
         return data
+
+    async def _visible_assignment(
+        self,
+        connection: asyncpg.Connection,
+        user: User,
+        assignment_id: str,
+    ) -> Mapping[str, Any]:
+        assignment = await connection.fetchrow(
+            """
+            SELECT a.id, a.title, a.due_date,
+                   array_agg(DISTINCT ac.class_id ORDER BY ac.class_id) AS class_ids
+            FROM assignments a
+            JOIN assignment_classes ac ON ac.tenant_id = a.tenant_id AND ac.assignment_id = a.id
+            WHERE a.tenant_id = $1 AND a.id = $2 AND NOT a.is_deleted
+            GROUP BY a.id, a.title, a.due_date
+            """,
+            user.tenant_id,
+            assignment_id,
+        )
+        if assignment is None:
+            raise AppError(404, 4004, "作业不存在")
+        assignment_class_ids = {str(value) for value in assignment["class_ids"]}
+        if user.role not in {"admin", "sysadmin"} and not (set(user.class_ids) & assignment_class_ids):
+            raise AppError(403, 4003, "该作业不属于你所在的班级")
+        return assignment
+
+    async def submit_assignment(
+        self,
+        user: User,
+        payload: dict[str, Any],
+        grade_problem: Callable[[JsonDict, str], JsonDict],
+    ) -> JsonDict:
+        assignment_id = self._uuid_text(payload["assignment_id"], "assignment_id")
+        answer_by_problem = {
+            self._uuid_text(item["problem_id"], "problem_id"): item["answer_text"] for item in payload["answers"]
+        }
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            assignment = await self._visible_assignment(connection, user, assignment_id)
+            due_date = assignment["due_date"]
+            if due_date is not None and self._assignment_status(due_date) == "expired":
+                raise AppError(410, 4006, "作业已截止，无法提交")
+            existing = await connection.fetchval(
+                """
+                SELECT id FROM submissions
+                WHERE tenant_id = $1 AND student_id = $2 AND assignment_id = $3
+                """,
+                user.tenant_id,
+                user.user_id,
+                assignment_id,
+            )
+            if existing is not None:
+                raise AppError(409, 4005, "该作业已提交，不可重复提交")
+            problem_rows = await connection.fetch(
+                """
+                SELECT p.id, p.problem_text, p.problem_type, p.grade_level, p.difficulty,
+                       p.reference_answer, p.solution_steps, p.common_errors, p.tags, ap.position
+                FROM assignment_problems ap
+                JOIN problems p ON p.id = ap.problem_id AND NOT p.is_deleted
+                WHERE ap.tenant_id = $1 AND ap.assignment_id = $2
+                ORDER BY ap.position
+                """,
+                user.tenant_id,
+                assignment_id,
+            )
+            allowed_ids = {str(row["id"]) for row in problem_rows}
+            if set(answer_by_problem) != allowed_ids:
+                if any(problem_id not in allowed_ids for problem_id in answer_by_problem):
+                    raise AppError(403, 4003, "题目不属于该作业")
+                raise AppError(422, 4022, "请求参数校验失败", "answers must cover every assignment problem")
+
+            submission_row = await connection.fetchrow(
+                """
+                INSERT INTO submissions (tenant_id, assignment_id, student_id, status)
+                VALUES ($1, $2, $3, 'grading')
+                RETURNING id, submitted_at, updated_at
+                """,
+                user.tenant_id,
+                assignment_id,
+                user.user_id,
+            )
+            submission_id = str(submission_row["id"])
+            results: list[JsonDict] = []
+            pending = 0
+            for row in problem_rows:
+                problem_id = str(row["id"])
+                problem = {
+                    "problem_id": problem_id,
+                    "problem_text": row["problem_text"],
+                    "problem_type": row["problem_type"],
+                    "grade_level": row["grade_level"],
+                    "difficulty": row["difficulty"],
+                    "reference_answer": row["reference_answer"],
+                    "solution_steps": self._json_value(row["solution_steps"], []),
+                    "common_errors": self._json_value(row["common_errors"], []),
+                    "tags": list(row["tags"] or []),
+                }
+                result = {
+                    "problem_id": problem_id,
+                    "sequence": int(row["position"]),
+                    "problem_text": row["problem_text"],
+                    **grade_problem(problem, str(answer_by_problem[problem_id])),
+                }
+                await connection.execute(
+                    """
+                    INSERT INTO submission_answers (
+                        tenant_id, submission_id, problem_id, answer_text, hint_level, attempt_number
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    """,
+                    user.tenant_id,
+                    submission_id,
+                    problem_id,
+                    result["student_answer"],
+                    result["hint_level"],
+                    result["attempt_number"],
+                )
+                grading_id = await connection.fetchval(
+                    """
+                    INSERT INTO grading_results (
+                        tenant_id, submission_id, problem_id, attempt_number, is_correct,
+                        confidence_score, error_type, feedback_text, encouragement, next_hint,
+                        routed_to_human, human_review_reason, source, agent_trace
+                    )
+                    VALUES (
+                        $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                        $11, $12, $13, $14::jsonb
+                    )
+                    RETURNING id
+                    """,
+                    user.tenant_id,
+                    submission_id,
+                    problem_id,
+                    result["attempt_number"],
+                    result["is_correct"],
+                    result["confidence_score"],
+                    result["error_type"],
+                    result["feedback_text"],
+                    result["encouragement"],
+                    result["next_hint"],
+                    result["routed_to_human"],
+                    "low_confidence" if result["routed_to_human"] else None,
+                    result["grading_source"],
+                    json.dumps(result.get("agent_trace", []), ensure_ascii=False),
+                )
+                if result["routed_to_human"]:
+                    pending += 1
+                    await connection.execute(
+                        """
+                        INSERT INTO human_review_queue (tenant_id, grading_result_id, reason)
+                        VALUES ($1, $2, 'low_confidence')
+                        """,
+                        user.tenant_id,
+                        grading_id,
+                    )
+                results.append(result)
+
+            correct = sum(result["is_correct"] is True for result in results)
+            status = "partial_human_review" if pending else "graded"
+            updated_at = await connection.fetchval(
+                """
+                UPDATE submissions SET status = $3
+                WHERE tenant_id = $1 AND id = $2
+                RETURNING updated_at
+                """,
+                user.tenant_id,
+                submission_id,
+                status,
+            )
+
+        submission = {
+            "submission_id": submission_id,
+            "status": status,
+            "submitted_at": submission_row["submitted_at"].isoformat(),
+            "last_updated_at": updated_at.isoformat(),
+            "results": results,
+            "summary": {
+                "total": len(results),
+                "correct": correct,
+                "wrong": len(results) - correct - pending,
+                "pending_review": pending,
+                "accuracy": round(correct / len(results), 3) if results else 0.0,
+            },
+        }
+        return self._public_submission(submission)
+
+    @staticmethod
+    def _submission_visible_to(user: User, class_ids: set[str], student_id: str) -> bool:
+        if user.role in {"admin", "sysadmin"}:
+            return True
+        if user.role == "student":
+            return student_id == user.user_id
+        return bool(set(user.class_ids) & class_ids)
+
+    async def list_submissions(
+        self,
+        user: User,
+        *,
+        student_id: str | None,
+        assignment_id: str | None,
+        page_number: int,
+        page_size: int,
+    ) -> JsonDict:
+        if user.role == "student":
+            student_id = user.user_id
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            rows = await connection.fetch(
+                """
+                SELECT s.id, s.assignment_id, s.student_id, s.status, s.submitted_at, s.updated_at,
+                       array_agg(DISTINCT ac.class_id ORDER BY ac.class_id) AS class_ids
+                FROM submissions s
+                JOIN assignment_classes ac ON ac.tenant_id = s.tenant_id AND ac.assignment_id = s.assignment_id
+                WHERE s.tenant_id = $1
+                  AND ($2::uuid IS NULL OR s.student_id = $2::uuid)
+                  AND ($3::uuid IS NULL OR s.assignment_id = $3::uuid)
+                GROUP BY s.id, s.assignment_id, s.student_id, s.status, s.submitted_at, s.updated_at
+                ORDER BY s.submitted_at DESC, s.id DESC
+                """,
+                user.tenant_id,
+                student_id,
+                assignment_id,
+            )
+        items: list[JsonDict] = []
+        for row in rows:
+            class_ids = {str(value) for value in row["class_ids"]}
+            if not self._submission_visible_to(user, class_ids, str(row["student_id"])):
+                continue
+            items.append(
+                {
+                    "submission_id": str(row["id"]),
+                    "assignment_id": str(row["assignment_id"]),
+                    "student_id": str(row["student_id"]),
+                    "status": row["status"],
+                    "submitted_at": row["submitted_at"].isoformat(),
+                    "last_updated_at": row["updated_at"].isoformat(),
+                }
+            )
+        return self._page(items, page_number, page_size)
+
+    async def submission_detail(self, user: User, submission_id: str) -> JsonDict:
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            submission = await connection.fetchrow(
+                """
+                SELECT s.id, s.assignment_id, s.student_id, s.status, s.submitted_at, s.updated_at,
+                       array_agg(DISTINCT ac.class_id ORDER BY ac.class_id) AS class_ids
+                FROM submissions s
+                JOIN assignment_classes ac ON ac.tenant_id = s.tenant_id AND ac.assignment_id = s.assignment_id
+                WHERE s.tenant_id = $1 AND s.id = $2
+                GROUP BY s.id, s.assignment_id, s.student_id, s.status, s.submitted_at, s.updated_at
+                """,
+                user.tenant_id,
+                submission_id,
+            )
+            if submission is None:
+                raise AppError(404, 4004, "提交记录不存在")
+            class_ids = {str(value) for value in submission["class_ids"]}
+            if not self._submission_visible_to(user, class_ids, str(submission["student_id"])):
+                raise AppError(404, 4004, "提交记录不存在")
+            rows = await connection.fetch(
+                """
+                SELECT gr.problem_id, gr.attempt_number, gr.is_correct, gr.confidence_score,
+                       gr.error_type, gr.feedback_text, gr.encouragement, gr.next_hint,
+                       gr.routed_to_human, gr.source, gr.agent_trace,
+                       sa.answer_text AS student_answer, sa.hint_level,
+                       p.problem_text, ap.position
+                FROM grading_results gr
+                JOIN submission_answers sa
+                  ON sa.tenant_id = gr.tenant_id
+                 AND sa.submission_id = gr.submission_id
+                 AND sa.problem_id = gr.problem_id
+                 AND sa.attempt_number = gr.attempt_number
+                JOIN problems p ON p.id = gr.problem_id
+                JOIN assignment_problems ap
+                  ON ap.tenant_id = gr.tenant_id
+                 AND ap.assignment_id = $3
+                 AND ap.problem_id = gr.problem_id
+                WHERE gr.tenant_id = $1 AND gr.submission_id = $2
+                ORDER BY ap.position, gr.attempt_number
+                """,
+                user.tenant_id,
+                submission_id,
+                submission["assignment_id"],
+            )
+        results: list[JsonDict] = []
+        for row in rows:
+            results.append(
+                {
+                    "problem_id": str(row["problem_id"]),
+                    "sequence": int(row["position"]),
+                    "problem_text": row["problem_text"],
+                    "student_answer": row["student_answer"],
+                    "is_correct": row["is_correct"],
+                    "confidence_score": row["confidence_score"],
+                    "feedback_text": row["feedback_text"],
+                    "encouragement": row["encouragement"],
+                    "next_hint": row["next_hint"],
+                    "error_type": row["error_type"],
+                    "hint_level": row["hint_level"],
+                    "attempt_number": row["attempt_number"],
+                    "routed_to_human": row["routed_to_human"],
+                    "grading_source": row["source"],
+                    "agent_trace": self._json_value(row["agent_trace"], []),
+                }
+            )
+        correct = sum(result["is_correct"] is True for result in results)
+        pending = sum(bool(result["routed_to_human"]) for result in results)
+        submission_data = {
+            "submission_id": str(submission["id"]),
+            "status": submission["status"],
+            "submitted_at": submission["submitted_at"].isoformat(),
+            "last_updated_at": submission["updated_at"].isoformat(),
+            "results": results,
+            "summary": {
+                "total": len(results),
+                "correct": correct,
+                "wrong": len(results) - correct - pending,
+                "pending_review": pending,
+                "accuracy": round(correct / len(results), 3) if results else 0.0,
+            },
+        }
+        return self._public_submission(submission_data)

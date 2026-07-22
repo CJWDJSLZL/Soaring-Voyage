@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -62,3 +63,19 @@ class IdentityProblemRepository(Protocol):
         page_size: int,
     ) -> JsonDict: ...
     async def assignment_detail(self, user: User, assignment_id: str) -> JsonDict: ...
+    async def submit_assignment(
+        self,
+        user: User,
+        payload: dict[str, Any],
+        grade_problem: Callable[[JsonDict, str], JsonDict],
+    ) -> JsonDict: ...
+    async def list_submissions(
+        self,
+        user: User,
+        *,
+        student_id: str | None,
+        assignment_id: str | None,
+        page_number: int,
+        page_size: int,
+    ) -> JsonDict: ...
+    async def submission_detail(self, user: User, submission_id: str) -> JsonDict: ...

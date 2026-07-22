@@ -7,8 +7,8 @@ ROOT = Path(__file__).parents[3]
 
 def test_second_migration_adds_nonnegative_token_version_without_rewriting_initial_schema() -> None:
     migrations = ROOT / "backend" / "migrations"
-    initial = (migrations / "001_initial_schema.sql").read_text()
-    second = (migrations / "002_user_token_version.sql").read_text().lower()
+    initial = (migrations / "001_initial_schema.sql").read_text(encoding="utf-8")
+    second = (migrations / "002_user_token_version.sql").read_text(encoding="utf-8").lower()
 
     assert "token_version" not in initial.lower()
     assert "alter table users" in second
@@ -17,7 +17,7 @@ def test_second_migration_adds_nonnegative_token_version_without_rewriting_initi
 
 
 def test_ci_prepares_and_runs_runtime_role_postgres_integration() -> None:
-    workflow_text = (ROOT / ".github" / "workflows" / "backend-ci.yml").read_text()
+    workflow_text = (ROOT / ".github" / "workflows" / "backend-ci.yml").read_text(encoding="utf-8")
     workflow = workflow_text.lower()
 
     assert "prepare runtime-role integration database" in workflow

@@ -11,6 +11,9 @@ from app.domain.postgres import NIL_SYSTEM_USER_ID, PostgresIdentityProblemRepos
 
 TENANT = "11111111-1111-4111-8111-111111111111"
 USER_ID = "22222222-2222-4222-8222-222222222222"
+CLASS_ID = "33333333-3333-4333-8333-333333333333"
+ASSIGNMENT_ID = "55555555-5555-4555-8555-555555555555"
+PROBLEM_ID = "66666666-6666-4666-8666-666666666666"
 
 
 class AsyncContext:
@@ -200,3 +203,70 @@ async def test_problem_insert_and_list_are_tenant_scoped_and_deterministically_o
     assert result["items"][0]["problem_id"] == str(problem_id)
     assert result["items"][0]["created_at"] == created_at.isoformat()
     assert result["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_assignment_persists_answer_grading_and_review_queue() -> None:
+    connection = AsyncMock()
+    submitted_at = datetime(2026, 1, 1, tzinfo=UTC)
+    updated_at = datetime(2026, 1, 1, 0, 0, 1, tzinfo=UTC)
+    submission_id = UUID("77777777-7777-4777-8777-777777777777")
+    grading_id = UUID("88888888-8888-4888-8888-888888888888")
+    connection.fetchrow.side_effect = [
+        {
+            "id": UUID(ASSIGNMENT_ID),
+            "title": "A",
+            "due_date": None,
+            "class_ids": [UUID(CLASS_ID)],
+        },
+        {"id": submission_id, "submitted_at": submitted_at, "updated_at": submitted_at},
+    ]
+    connection.fetchval.side_effect = [None, grading_id, updated_at]
+    connection.fetch.return_value = [
+        {
+            "id": UUID(PROBLEM_ID),
+            "problem_text": "1 + 1 = ___",
+            "problem_type": "arithmetic",
+            "grade_level": 3,
+            "difficulty": "easy",
+            "reference_answer": "2",
+            "solution_steps": ["add"],
+            "common_errors": [],
+            "tags": ["加法"],
+            "position": 1,
+        }
+    ]
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    student = User(USER_ID, "student", "Student", b"hash", "student", TENANT, [CLASS_ID], 3)
+
+    result = await repository.submit_assignment(
+        student,
+        {
+            "assignment_id": ASSIGNMENT_ID,
+            "answers": [{"problem_id": PROBLEM_ID, "answer_text": "uncertain:2"}],
+        },
+        lambda _problem, answer: {
+            "student_answer": answer,
+            "is_correct": None,
+            "confidence_score": 0.5,
+            "feedback_text": "老师正在审核这道题。",
+            "encouragement": "继续努力，你可以的！",
+            "next_hint": None,
+            "error_type": None,
+            "hint_level": 0,
+            "attempt_number": 1,
+            "routed_to_human": True,
+            "grading_source": "pending_human_review",
+            "agent_trace": [{"node": "router"}],
+        },
+    )
+
+    executed_sql = "\n".join(call.args[0] for call in connection.execute.await_args_list)
+    fetched_sql = "\n".join(call.args[0] for call in connection.fetchval.await_args_list)
+    assert "INSERT INTO submission_answers" in executed_sql
+    assert "INSERT INTO human_review_queue" in executed_sql
+    assert "INSERT INTO grading_results" in fetched_sql
+    assert "UPDATE submissions SET status = $3" in fetched_sql
+    assert result["status"] == "partial_human_review"
+    assert result["summary"]["pending_review"] == 1
+    assert "agent_trace" not in result["results"][0]

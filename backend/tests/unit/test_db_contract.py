@@ -100,7 +100,7 @@ async def test_tenant_context_is_required() -> None:
 
 
 def test_initial_migration_contains_required_schema_and_rls() -> None:
-    sql = (Path(__file__).parents[2] / "migrations" / "001_initial_schema.sql").read_text()
+    sql = (Path(__file__).parents[2] / "migrations" / "001_initial_schema.sql").read_text(encoding="utf-8")
     required_tables = {
         "tenants",
         "users",
@@ -138,7 +138,7 @@ def test_initial_migration_contains_required_schema_and_rls() -> None:
 
 
 def test_initial_migration_bootstraps_runtime_role_before_grants() -> None:
-    sql = (Path(__file__).parents[2] / "migrations" / "001_initial_schema.sql").read_text().lower()
+    sql = (Path(__file__).parents[2] / "migrations" / "001_initial_schema.sql").read_text(encoding="utf-8").lower()
 
     role_guard = "select 1 from pg_roles where rolname = 'soaring_voyage_app'"
     role_create = "create role soaring_voyage_app"
