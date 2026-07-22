@@ -49,6 +49,7 @@ def test_memory_lifecycle_keeps_single_store_as_identity_repository() -> None:
     assert response.status_code == 200
     assert response.json()["services"]["repository"] == "development-in-memory-adapter"
     assert response.json()["services"]["database"] == "not-wired"
+    assert response.json()["services"]["qdrant"] == "local-metadata-index"
 
 
 def test_postgres_pool_repository_health_and_shutdown_lifecycle() -> None:
@@ -153,6 +154,7 @@ def test_production_lifecycle_uses_external_adapters_without_memory_store() -> N
     assert body["environment"] == "production"
     assert body["services"]["database"] == "ok"
     assert body["services"]["redis"] == "ok"
+    assert body["services"]["qdrant"] == "local-metadata-index"
     pool.close.assert_awaited_once_with()
     assert fake_redis.closed is True
 

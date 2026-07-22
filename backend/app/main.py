@@ -153,7 +153,7 @@ def create_app(
                 else "unavailable"
                 if configured.redis_url
                 else "not-wired",
-                "qdrant": "not-wired",
+                "qdrant": "local-metadata-index",
                 "llm": request.app.state.llm_grader.health_status,
             },
         }

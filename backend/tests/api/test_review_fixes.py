@@ -44,6 +44,7 @@ def test_health_cors_trusted_host_and_token_detail() -> None:
     health = client.get("/health")
     assert health.json()["status"] == "degraded"
     assert health.json()["services"]["database"] == "not-wired"
+    assert health.json()["services"]["qdrant"] == "local-metadata-index"
     assert client.get("/health", headers={"Host": "evil.example"}).status_code == 400
 
     cors = client.options(
