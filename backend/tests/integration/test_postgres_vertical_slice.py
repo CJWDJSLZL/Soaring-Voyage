@@ -197,20 +197,31 @@ async def test_runtime_role_rls_identity_token_version_and_problem_persistence()
             submission = client.post(
                 "/api/v1/submissions/",
                 headers=student_auth,
-                json={"assignment_id": assignment_id, "answers": [{"problem_id": api_problem_id, "answer_text": "4"}]},
+                json={
+                    "assignment_id": assignment_id,
+                    "answers": [{"problem_id": api_problem_id, "answer_text": "uncertain:4"}],
+                },
             )
             assert submission.status_code == 201
             submission_data = submission.json()["data"]
-            assert submission_data["status"] == "graded"
+            assert submission_data["status"] == "partial_human_review"
             assert submission_data["summary"] == {
                 "total": 1,
-                "correct": 1,
+                "correct": 0,
                 "wrong": 0,
-                "pending_review": 0,
-                "accuracy": 1.0,
+                "pending_review": 1,
+                "accuracy": 0.0,
             }
-            assert submission_data["results"][0]["is_correct"] is True
+            assert submission_data["results"][0]["is_correct"] is None
             assert "agent_trace" not in submission_data["results"][0]
+
+            reviews = client.get("/api/v1/teacher/human-review-queue", headers=authorization)
+            assert reviews.status_code == 200
+            assert reviews.headers["X-Pending-Review-Count"] == "1"
+            review_id = reviews.json()["data"]["items"][0]["review_id"]
+            review_detail = client.get(f"/api/v1/teacher/human-review/{review_id}", headers=authorization)
+            assert review_detail.status_code == 200
+            assert review_detail.json()["data"]["submission_id"] == submission_data["submission_id"]
 
             duplicate = client.post(
                 "/api/v1/submissions/",
@@ -239,8 +250,22 @@ async def test_runtime_role_rls_identity_token_version_and_problem_persistence()
                 headers=student_auth,
                 json={"problem_id": api_problem_id, "new_answer": "4"},
             )
-            assert hint.status_code == 503
-            assert hint.json()["code"] == 5003
+            assert hint.status_code == 200
+            assert hint.json()["data"]["is_correct"] is True
+            hinted_detail = client.get(
+                f"/api/v1/submissions/{submission_data['submission_id']}",
+                headers=student_auth,
+            )
+            assert hinted_detail.status_code == 200
+            assert hinted_detail.json()["data"]["status"] == "graded"
+
+            events = client.get(
+                f"/api/v1/submissions/{submission_data['submission_id']}/events",
+                headers=student_auth,
+                params={"sse_ticket": "ticket"},
+            )
+            assert events.status_code == 503
+            assert events.json()["code"] == 5003
 
         other_tenant = str(uuid4())
         with tenant_context(other_tenant, "worker"):

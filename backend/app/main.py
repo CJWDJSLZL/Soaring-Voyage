@@ -71,20 +71,17 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
         supplied = request.headers.get("X-Trace-ID", "")
         request.state.trace_id = supplied if supplied.startswith("req-") else f"req-{uuid4()}"
         path = request.url.path
-        unported_prefixes = (f"{configured.api_prefix}/teacher/human-review",)
         unported_exact = {f"{configured.api_prefix}/auth/sse-ticket"}
-        unported_submission_suffixes = ("/hint", "/events")
+        unported_submission_suffixes = ("/events",)
         if configured.persistence_backend == "postgres" and (
-            path.startswith(unported_prefixes)
-            or path in unported_exact
-            or any(path.endswith(suffix) for suffix in unported_submission_suffixes)
+            path in unported_exact or any(path.endswith(suffix) for suffix in unported_submission_suffixes)
         ):
             response = JSONResponse(
                 status_code=503,
                 content={
                     "code": 5003,
                     "message": "该工作流尚未迁移到 PostgreSQL",
-                    "detail": "当前 PostgreSQL 阶段支持认证、题库、作业和首次提交；提示、SSE 与人工复核仍在迁移中",
+                    "detail": "当前 PostgreSQL 阶段支持认证、题库、作业、提交、提示和人工复核；SSE 仍在迁移中",
                     "trace_id": request.state.trace_id,
                 },
             )

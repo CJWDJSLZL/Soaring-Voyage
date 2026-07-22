@@ -643,8 +643,17 @@ async def hint(
     request: Request,
     user: User = Depends(require_roles("student")),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
     llm_grader: DeepSeekGradingClient = Depends(get_llm_grader),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        data = await repository.request_hint(
+            user,
+            submission_id,
+            payload.model_dump(),
+            lambda problem, answer, hint_level: grade(problem, answer, llm_grader, hint_level),
+        )
+        return envelope(request, data)
     submission = get_visible_submission(store, submission_id, user)
     assignment = store.assignments[submission["assignment_id"]]
     if assignment["due_date"] and as_utc(assignment["due_date"]) <= utcnow():
@@ -729,7 +738,7 @@ async def hint(
 
 
 @router.get("/teacher/human-review-queue")
-def review_queue(
+async def review_queue(
     request: Request,
     response: Response,
     status: Literal["pending", "reviewed", "all"] = "pending",
@@ -737,7 +746,17 @@ def review_queue(
     page_size: int = Query(20, ge=1, le=100),
     user: User = Depends(require_roles("teacher", "admin")),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        data, pending_count = await repository.list_human_reviews(
+            user,
+            status=status,
+            page_number=page_number,
+            page_size=page_size,
+        )
+        response.headers["X-Pending-Review-Count"] = str(pending_count)
+        return envelope(request, data)
     visible_reviews = []
     for review in store.reviews.values():
         submission = store.submissions[review["submission_id"]]
@@ -752,12 +771,15 @@ def review_queue(
 
 
 @router.get("/teacher/human-review/{review_id}")
-def review_detail(
+async def review_detail(
     review_id: str,
     request: Request,
     user: User = Depends(require_roles("teacher", "admin")),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        return envelope(request, await repository.human_review_detail(user, review_id))
     review = store.reviews.get(review_id)
     if not review or review["tenant_id"] != user.tenant_id:
         raise AppError(404, 4004, "审核记录不存在")
@@ -768,13 +790,16 @@ def review_detail(
 
 
 @router.post("/teacher/human-review/{review_id}")
-def review_override(
+async def review_override(
     review_id: str,
     payload: ReviewRequest,
     request: Request,
     user: User = Depends(require_roles("teacher", "admin")),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        return envelope(request, await repository.resolve_human_review(user, review_id, payload.model_dump()))
     review = store.reviews.get(review_id)
     if not review or review["status"] != "pending" or review["tenant_id"] != user.tenant_id:
         raise AppError(404, 4004, "待审核记录不存在")
