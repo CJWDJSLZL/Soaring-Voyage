@@ -237,6 +237,13 @@ def test_core_submission_hint_and_duplicate_loop(client: TestClient):
     )
     assert duplicate.status_code == 409 and duplicate.json()["code"] == 4005
 
+    initial_stats = client.get(f"/api/v1/assignments/{assignment_id}/stats", headers=auth(teacher))
+    assert initial_stats.status_code == 200
+    initial_stats_data = initial_stats.json()["data"]
+    assert initial_stats_data["average_accuracy"] == 0.0
+    assert initial_stats_data["knowledge_point_alerts"][0]["knowledge_point"] == "加法"
+    assert initial_stats_data["knowledge_point_alerts"][0]["affected_student_count"] == 1
+
     hint = client.post(
         f"/api/v1/submissions/{submission_id}/hint",
         headers=auth(student),

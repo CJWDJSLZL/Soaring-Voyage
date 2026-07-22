@@ -471,7 +471,7 @@ class InMemoryRepository:
             "average_accuracy": round(correct / len(latest_results), 3) if latest_results else 0.0,
             "problem_stats": problem_stats,
             "error_distribution": error_distribution,
-            "knowledge_point_alerts": [],
+            "knowledge_point_alerts": self._knowledge_point_alerts(submissions),
         }
 
     async def create_class(self, user: User, payload: dict[str, Any]) -> JsonDict:
