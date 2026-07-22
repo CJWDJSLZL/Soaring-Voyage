@@ -17,7 +17,12 @@ from app.core.errors import AppError, envelope, utcnow
 from app.core.security import create_access_token, hash_password, verify_password
 from app.domain.models import Ticket, User
 from app.domain.repository import IdentityProblemRepository, Repository
-from app.exports import XLSX_MEDIA_TYPE, assignment_export_filename, build_assignment_report_xlsx
+from app.exports import (
+    XLSX_MEDIA_TYPE,
+    assignment_export_filename,
+    build_assignment_report_xlsx,
+    build_problem_import_template_xlsx,
+)
 from app.grading import DeepSeekGradingClient, GradeRequest, LLMUnavailableError, LLMVerdict, QuestionType, route_grade
 from app.harness import HarnessRunner
 from app.imports import parse_problem_import, parse_student_import
@@ -330,6 +335,17 @@ async def bulk_import_problems(
     ]
     return envelope(
         request, await repository.bulk_import_problems(user, rows, {"curriculum_version": curriculum_version})
+    )
+
+
+@router.get("/problems/bulk-import/template")
+async def problem_import_template(
+    user: User = Depends(require_roles("teacher", "admin", "sysadmin")),
+):
+    return Response(
+        content=build_problem_import_template_xlsx(),
+        media_type=XLSX_MEDIA_TYPE,
+        headers={"Content-Disposition": 'attachment; filename="problem_import_template.xlsx"'},
     )
 
 

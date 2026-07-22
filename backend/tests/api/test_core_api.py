@@ -138,6 +138,27 @@ def test_teacher_bulk_import_problems_from_csv(client: TestClient):
     assert job.status_code == 403
 
 
+def test_teacher_downloads_problem_import_template(client: TestClient):
+    teacher = login(client, "teacher")
+    student = login(client, "student")
+    denied = client.get("/api/v1/problems/bulk-import/template", headers=auth(student))
+    assert denied.status_code == 403
+
+    template = client.get("/api/v1/problems/bulk-import/template", headers=auth(teacher))
+
+    assert template.status_code == 200
+    assert template.headers["content-type"].startswith(
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert 'filename="problem_import_template.xlsx"' in template.headers["content-disposition"]
+    with zipfile.ZipFile(io.BytesIO(template.content)) as workbook:
+        assert "xl/worksheets/sheet1.xml" in workbook.namelist()
+        sheet = workbook.read("xl/worksheets/sheet1.xml").decode("utf-8")
+    assert "problem_text" in sheet
+    assert "reference_answer" in sheet
+    assert "solution_steps" in sheet
+
+
 def test_teacher_deletes_unreferenced_problem_but_not_assigned_problem(client: TestClient):
     teacher = login(client, "teacher")
     student = login(client, "student")

@@ -96,9 +96,45 @@ def build_assignment_report_xlsx(report: JsonDict) -> bytes:
         ("题目维度", problem_rows),
         ("学生维度", student_rows),
     ]
+    return _build_xlsx(sheets)
+
+
+def build_problem_import_template_xlsx() -> bytes:
+    return _build_xlsx(
+        [
+            (
+                "problem_import_template",
+                [
+                    [
+                        "problem_text",
+                        "problem_type",
+                        "reference_answer",
+                        "grade_level",
+                        "difficulty",
+                        "solution_steps",
+                        "common_errors",
+                        "tags",
+                    ],
+                    [
+                        "325 + 47 = ___",
+                        "arithmetic",
+                        "372",
+                        "3",
+                        "medium",
+                        "个位相加并处理进位;再计算十位和百位",
+                        "计算错误;进位错误",
+                        "加法;进位",
+                    ],
+                ],
+            )
+        ]
+    )
+
+
+def _build_xlsx(sheets: list[tuple[str, list[list[Any]]]]) -> bytes:
     output = io.BytesIO()
     with zipfile.ZipFile(output, "w", zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr("[Content_Types].xml", _content_types())
+        archive.writestr("[Content_Types].xml", _content_types(len(sheets)))
         archive.writestr("_rels/.rels", _root_rels())
         archive.writestr("xl/workbook.xml", _workbook([name for name, _rows in sheets]))
         archive.writestr("xl/_rels/workbook.xml.rels", _workbook_rels(len(sheets)))
@@ -120,15 +156,18 @@ def _correct_label(value: Any) -> str:
     return "待审核"
 
 
-def _content_types() -> str:
-    return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+def _content_types(sheet_count: int) -> str:
+    sheet_overrides = "\n".join(
+        f'  <Override PartName="/xl/worksheets/sheet{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        for index in range(1, sheet_count + 1)
+    )
+    return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
   <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
   <Default Extension="xml" ContentType="application/xml"/>
   <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
   <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-  <Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+{sheet_overrides}
 </Types>"""
 
 
