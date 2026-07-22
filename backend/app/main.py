@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
@@ -26,6 +27,13 @@ from app.realtime import MemoryTicketRepository, RedisTicketRepository, TicketRe
 PoolFactory = Callable[[str], Awaitable[asyncpg.Pool]]
 RedisFactory = Callable[[str], Redis]
 QdrantIndexerFactory = Callable[[Settings], QdrantIndexer | None]
+
+
+def service_health(status: str, *, latency_ms: int | None = None, backend: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {"status": status, "latency_ms": latency_ms}
+    if backend is not None:
+        payload["backend"] = backend
+    return payload
 
 
 def create_redis_client(redis_url: str) -> Redis:
@@ -100,6 +108,7 @@ def create_app(
     application.state.identity_repository = store
     application.state.ticket_repository = MemoryTicketRepository(store.tickets) if store is not None else None
     application.state.llm_grader = DeepSeekGradingClient(LLMClientConfig.from_settings(configured))
+    application.state.started_at = monotonic()
     application.add_middleware(TrustedHostMiddleware, allowed_hosts=list(configured.allowed_hosts))
     application.add_middleware(
         CORSMiddleware,
@@ -141,43 +150,65 @@ def create_app(
     @application.get("/health")
     async def health(request: Request):
         pool = request.app.state.pool
-        database_status = "not-wired"
+        services: dict[str, dict[str, Any]] = {}
         status_code = 200
         if pool is not None:
+            database_started = monotonic()
             try:
                 async with pool.acquire() as connection:
                     await connection.fetchval("SELECT 1")
-                database_status = "ok"
+                services["database"] = service_health("ok", latency_ms=round((monotonic() - database_started) * 1000))
             except Exception:  # health endpoint must report dependency failure without leaking details
-                database_status = "unavailable"
+                services["database"] = service_health("unavailable")
                 status_code = 503
+        else:
+            services["database"] = service_health("not-wired", backend=configured.persistence_backend)
         repository_status = (
             "hybrid-postgres-identity-problems-assignments"
             if configured.persistence_backend == "postgres"
             else "development-in-memory-adapter"
         )
+        services["repository"] = service_health("ok", backend=repository_status)
         ticket_repository: TicketRepository = request.app.state.ticket_repository
+        ticket_started = monotonic()
         tickets_ok = await ticket_repository.ping()
-        ticket_status = ticket_repository.backend_name if tickets_ok else "unavailable"
+        ticket_latency = round((monotonic() - ticket_started) * 1000) if tickets_ok else None
+        services["sse_tickets"] = service_health(
+            "ok" if tickets_ok else "unavailable",
+            latency_ms=ticket_latency,
+            backend=ticket_repository.backend_name,
+        )
         if not tickets_ok:
             status_code = 503
+        if configured.redis_url:
+            services["redis"] = service_health(
+                "ok" if tickets_ok else "unavailable",
+                latency_ms=ticket_latency if tickets_ok else None,
+                backend="redis",
+            )
+        else:
+            services["redis"] = service_health("not-wired")
+        rag_indexer = request.app.state.rag_indexer
+        services["qdrant"] = service_health(
+            "ok" if rag_indexer is not None else "not-wired",
+            backend=rag_indexer.status if rag_indexer is not None else "local-metadata-index",
+        )
+        llm_status = request.app.state.llm_grader.health_status
+        services["deepseek"] = service_health("ok" if llm_status in {"mock", "configured"} else llm_status)
+        unavailable = {"unavailable"}
+        degraded = {"not-wired", "unconfigured"}
+        overall = "ok"
+        if any(service["status"] in unavailable for service in services.values()):
+            overall = "degraded"
+        elif any(service["status"] in degraded for service in services.values()):
+            overall = "degraded"
         body = {
-            "status": "degraded",
+            "status": overall,
+            "version": request.app.version,
             "environment": configured.app_env,
-            "services": {
-                "repository": repository_status,
-                "sse_tickets": ticket_status,
-                "database": database_status,
-                "redis": "ok"
-                if configured.redis_url and tickets_ok
-                else "unavailable"
-                if configured.redis_url
-                else "not-wired",
-                "qdrant": request.app.state.rag_indexer.status
-                if request.app.state.rag_indexer is not None
-                else "local-metadata-index",
-                "llm": request.app.state.llm_grader.health_status,
-            },
+            "uptime_seconds": round(monotonic() - request.app.state.started_at),
+            "services": services,
+            "grading": {"active_requests": 0, "pending_hitl_count": 0},
         }
         return JSONResponse(status_code=status_code, content=body)
 

@@ -42,9 +42,13 @@ def test_health_cors_trusted_host_and_token_detail() -> None:
     app.state.store.reset()
     client = TestClient(app)
     health = client.get("/health")
-    assert health.json()["status"] == "degraded"
-    assert health.json()["services"]["database"] == "not-wired"
-    assert health.json()["services"]["qdrant"] == "local-metadata-index"
+    body = health.json()
+    assert body["status"] == "degraded"
+    assert body["version"] == "1.0.0"
+    assert body["uptime_seconds"] >= 0
+    assert body["grading"] == {"active_requests": 0, "pending_hitl_count": 0}
+    assert body["services"]["database"]["status"] == "not-wired"
+    assert body["services"]["qdrant"]["backend"] == "local-metadata-index"
     assert client.get("/health", headers={"Host": "evil.example"}).status_code == 400
 
     cors = client.options(

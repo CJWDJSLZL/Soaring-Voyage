@@ -46,6 +46,10 @@ class FakeRagIndexer:
         self.closed = True
 
 
+def service(body: dict[str, Any], name: str) -> dict[str, Any]:
+    return body["services"][name]
+
+
 def test_memory_lifecycle_keeps_single_store_as_identity_repository() -> None:
     configured = Settings(app_env="test", persistence_backend="memory")
     test_app = create_app(configured)
@@ -57,9 +61,17 @@ def test_memory_lifecycle_keeps_single_store_as_identity_repository() -> None:
         response = client.get("/health")
 
     assert response.status_code == 200
-    assert response.json()["services"]["repository"] == "development-in-memory-adapter"
-    assert response.json()["services"]["database"] == "not-wired"
-    assert response.json()["services"]["qdrant"] == "local-metadata-index"
+    body = response.json()
+    assert body["version"] == "1.0.0"
+    assert body["uptime_seconds"] >= 0
+    assert body["grading"] == {"active_requests": 0, "pending_hitl_count": 0}
+    assert service(body, "repository") == {
+        "status": "ok",
+        "latency_ms": None,
+        "backend": "development-in-memory-adapter",
+    }
+    assert service(body, "database") == {"status": "not-wired", "latency_ms": None, "backend": "memory"}
+    assert service(body, "qdrant") == {"status": "not-wired", "latency_ms": None, "backend": "local-metadata-index"}
 
 
 def test_postgres_pool_repository_health_and_shutdown_lifecycle() -> None:
@@ -91,9 +103,11 @@ def test_postgres_pool_repository_health_and_shutdown_lifecycle() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "degraded"
-    assert body["services"]["repository"] == "hybrid-postgres-identity-problems-assignments"
-    assert body["services"]["database"] == "ok"
-    assert body["services"]["sse_tickets"] == "development-in-memory-adapter"
+    assert service(body, "repository")["backend"] == "hybrid-postgres-identity-problems-assignments"
+    assert service(body, "database")["status"] == "ok"
+    assert service(body, "database")["latency_ms"] >= 0
+    assert service(body, "sse_tickets")["status"] == "ok"
+    assert service(body, "sse_tickets")["backend"] == "development-in-memory-adapter"
     assert unported.status_code == 401
 
 
@@ -123,8 +137,9 @@ def test_redis_ticket_repository_health_and_shutdown_lifecycle() -> None:
         assert fake_redis.closed is False
 
     body = response.json()
-    assert body["services"]["sse_tickets"] == "redis"
-    assert body["services"]["redis"] == "ok"
+    assert service(body, "sse_tickets")["backend"] == "redis"
+    assert service(body, "redis")["status"] == "ok"
+    assert service(body, "redis")["latency_ms"] >= 0
     assert fake_redis.closed is True
 
 
@@ -165,9 +180,9 @@ def test_production_lifecycle_uses_external_adapters_without_memory_store() -> N
     assert response.status_code == 200
     body = response.json()
     assert body["environment"] == "production"
-    assert body["services"]["database"] == "ok"
-    assert body["services"]["redis"] == "ok"
-    assert body["services"]["qdrant"] == "qdrant-configured"
+    assert service(body, "database")["status"] == "ok"
+    assert service(body, "redis")["status"] == "ok"
+    assert service(body, "qdrant") == {"status": "ok", "latency_ms": None, "backend": "qdrant-configured"}
     pool.close.assert_awaited_once_with()
     assert fake_redis.closed is True
     assert fake_rag.closed is True
@@ -191,7 +206,7 @@ def test_postgres_health_reports_failed_ping() -> None:
         response = client.get("/health")
 
     assert response.status_code == 503
-    assert response.json()["services"]["database"] == "unavailable"
+    assert service(response.json(), "database") == {"status": "unavailable", "latency_ms": None}
 
 
 def test_application_factory_uses_supplied_jwt_settings() -> None:
