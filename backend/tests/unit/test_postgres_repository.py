@@ -418,3 +418,78 @@ async def test_assignment_stats_checks_visibility_and_aggregates_problem_results
     fetched_sql = "\n".join(call.args[0] for call in connection.fetch.await_args_list)
     assert "assignment_problems" in fetched_sql
     assert "grading_results" in fetched_sql
+
+
+@pytest.mark.asyncio
+async def test_teacher_dashboard_aggregates_visible_classes() -> None:
+    connection = AsyncMock()
+    connection.fetch.side_effect = [
+        [{"id": UUID(CLASS_ID), "name": "Class A"}],
+        [{"error_type": "calculation_error", "count": 2}],
+        [{"bucket": datetime(2026, 7, 20, tzinfo=UTC).date(), "total_results": 4, "correct_results": 3}],
+    ]
+    connection.fetchval.side_effect = [2, 1]
+    connection.fetchrow.return_value = {
+        "total_submissions": 1,
+        "total_results": 4,
+        "correct_results": 3,
+        "human_review_results": 1,
+    }
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    teacher = PostgresIdentityProblemRepository.user_from_row(user_row())
+
+    dashboard = await repository.teacher_dashboard(teacher, class_id=None, assignment_id=None, days=30)
+
+    assert dashboard["class_name"] == "Class A"
+    assert dashboard["overview"]["total_submissions"] == 1
+    assert dashboard["overview"]["average_accuracy"] == 0.75
+    assert dashboard["overview"]["submission_rate"] == 0.5
+    assert dashboard["overview"]["human_review_rate"] == 0.25
+    assert dashboard["error_distribution"] == {"calculation_error": 2}
+    class_sql = connection.fetch.await_args_list[0].args[0]
+    assert "teacher_id = $4::uuid" in class_sql
+
+
+@pytest.mark.asyncio
+async def test_student_analytics_checks_teacher_visibility_and_aggregates_results() -> None:
+    connection = AsyncMock()
+    connection.fetchrow.side_effect = [
+        {
+            "id": UUID("44444444-4444-4444-8444-444444444444"),
+            "display_name": "Student",
+            "grade_level": 3,
+            "class_names": ["Class A"],
+            "class_ids": [UUID(CLASS_ID)],
+        },
+        {
+            "total_submissions": 2,
+            "total_results": 5,
+            "correct_results": 3,
+            "wrong_results": 2,
+            "total_hints_used": 3,
+            "hinted_results": 2,
+            "max_hint_reached_count": 1,
+        },
+    ]
+    connection.fetch.side_effect = [
+        [{"error_type": "calculation_error", "count": 2}],
+        [{"bucket": datetime(2026, 7, 21, tzinfo=UTC).date(), "total_results": 5, "correct_results": 3}],
+        [
+            {
+                "point": "addition",
+                "error_count": 2,
+                "last_error_at": datetime(2026, 7, 21, 8, tzinfo=UTC),
+            }
+        ],
+    ]
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    teacher = PostgresIdentityProblemRepository.user_from_row(user_row())
+
+    analytics = await repository.student_analytics(teacher, "44444444-4444-4444-8444-444444444444", days=30)
+
+    assert analytics["student_name"] == "Student"
+    assert analytics["overall_accuracy"] == 0.6
+    assert analytics["hint_usage"]["total_hints_used"] == 3
+    assert analytics["hint_usage"]["hint_dependency_rate"] == 0.4
+    assert analytics["error_type_breakdown"] == {"calculation_error": 2}
+    assert analytics["weak_knowledge_points"][0]["point"] == "addition"

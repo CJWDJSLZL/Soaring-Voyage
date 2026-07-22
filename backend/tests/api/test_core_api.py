@@ -186,6 +186,46 @@ def test_core_submission_hint_and_duplicate_loop(client: TestClient):
     assert hidden.status_code == 404
 
 
+def test_teacher_dashboard_and_student_analytics(client: TestClient):
+    teacher = login(client, "teacher")
+    student = login(client, "student")
+    admin = login(client, "admin")
+    problem_id, assignment_id = make_problem_and_assignment(client, teacher)
+    submitted = client.post(
+        "/api/v1/submissions/",
+        headers=auth(student),
+        json={"assignment_id": assignment_id, "answers": [{"problem_id": problem_id, "answer_text": "371"}]},
+    )
+    assert submitted.status_code == 201, submitted.text
+
+    denied = client.get("/api/v1/teacher/dashboard", headers=auth(student))
+    assert denied.status_code == 403
+
+    dashboard = client.get(
+        f"/api/v1/teacher/dashboard?class_id=class-3a&assignment_id={assignment_id}&days=30",
+        headers=auth(teacher),
+    )
+    assert dashboard.status_code == 200, dashboard.text
+    data = dashboard.json()["data"]
+    assert data["overview"]["total_submissions"] == 1
+    assert data["overview"]["average_accuracy"] == 0.0
+    assert data["error_distribution"]
+    assert data["students_needing_attention"][0]["student_id"] == "user-student"
+
+    analytics = client.get("/api/v1/teacher/students/user-student/analytics?days=30", headers=auth(teacher))
+    assert analytics.status_code == 200, analytics.text
+    student_data = analytics.json()["data"]
+    assert student_data["total_submissions"] == 1
+    assert student_data["total_problems_answered"] == 1
+    assert student_data["overall_accuracy"] == 0.0
+    assert student_data["error_type_breakdown"]
+
+    forbidden = client.get("/api/v1/teacher/students/user-student2/analytics", headers=auth(teacher))
+    assert forbidden.status_code == 403
+    admin_view = client.get("/api/v1/teacher/students/user-student/analytics", headers=auth(admin))
+    assert admin_view.status_code == 200
+
+
 def test_hitl_review_and_one_time_sse_ticket(client: TestClient):
     teacher = login(client, "teacher")
     student = login(client, "student")

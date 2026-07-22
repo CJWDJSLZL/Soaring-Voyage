@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -1445,6 +1445,387 @@ class PostgresIdentityProblemRepository:
             "status": submission["status"],
             "last_updated_at": submission["updated_at"].isoformat(),
             "summary": self._summary(results),
+        }
+
+    async def teacher_dashboard(
+        self, user: User, *, class_id: str | None, assignment_id: str | None, days: int
+    ) -> JsonDict:
+        normalized_class_id = self._uuid_text(class_id, "class_id") if class_id else None
+        normalized_assignment_id = self._uuid_text(assignment_id, "assignment_id") if assignment_id else None
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            class_rows = await connection.fetch(
+                """
+                SELECT id, name
+                FROM classes
+                WHERE tenant_id = $1
+                  AND NOT is_deleted
+                  AND ($2::uuid IS NULL OR id = $2::uuid)
+                  AND ($3::boolean OR teacher_id = $4::uuid)
+                ORDER BY name
+                """,
+                user.tenant_id,
+                normalized_class_id,
+                user.role in {"admin", "sysadmin"},
+                user.user_id,
+            )
+            if normalized_class_id and not class_rows:
+                if user.role == "teacher":
+                    raise AppError(403, 4003, "权限不足")
+                raise AppError(404, 4004, "班级不存在")
+            class_ids = [str(row["id"]) for row in class_rows]
+            class_name = (
+                "全校"
+                if user.role in {"admin", "sysadmin"} and not normalized_class_id
+                else "、".join(row["name"] for row in class_rows)
+            )
+            if not class_ids:
+                return self._empty_teacher_dashboard(class_name, days, cutoff)
+            if normalized_assignment_id is not None:
+                assignment_visible = await connection.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM assignments a
+                    JOIN assignment_classes ac ON ac.tenant_id = a.tenant_id AND ac.assignment_id = a.id
+                    WHERE a.tenant_id = $1
+                      AND a.id = $2
+                      AND ac.class_id = ANY($3::uuid[])
+                      AND NOT a.is_deleted
+                    """,
+                    user.tenant_id,
+                    normalized_assignment_id,
+                    class_ids,
+                )
+                if int(assignment_visible or 0) == 0:
+                    raise AppError(404, 4004, "作业不存在")
+            total_students = int(
+                await connection.fetchval(
+                    """
+                    SELECT COUNT(DISTINCT student_id)
+                    FROM class_students
+                    WHERE tenant_id = $1 AND class_id = ANY($2::uuid[]) AND is_active
+                    """,
+                    user.tenant_id,
+                    class_ids,
+                )
+                or 0
+            )
+            assignment_count = int(
+                await connection.fetchval(
+                    """
+                    SELECT COUNT(DISTINCT a.id)
+                    FROM assignments a
+                    JOIN assignment_classes ac ON ac.tenant_id = a.tenant_id AND ac.assignment_id = a.id
+                    WHERE a.tenant_id = $1
+                      AND ac.class_id = ANY($2::uuid[])
+                      AND ($3::uuid IS NULL OR a.id = $3::uuid)
+                      AND NOT a.is_deleted
+                    """,
+                    user.tenant_id,
+                    class_ids,
+                    normalized_assignment_id,
+                )
+                or 0
+            )
+            overview = await connection.fetchrow(
+                """
+                WITH visible_submissions AS (
+                    SELECT DISTINCT s.id, s.student_id
+                    FROM submissions s
+                    JOIN assignment_classes ac ON ac.tenant_id = s.tenant_id AND ac.assignment_id = s.assignment_id
+                    WHERE s.tenant_id = $1
+                      AND ac.class_id = ANY($2::uuid[])
+                      AND ($3::uuid IS NULL OR s.assignment_id = $3::uuid)
+                      AND s.submitted_at >= $4
+                ),
+                latest AS (
+                    SELECT DISTINCT ON (gr.submission_id, gr.problem_id)
+                           gr.submission_id, gr.problem_id, gr.is_correct, gr.routed_to_human
+                    FROM grading_results gr
+                    JOIN visible_submissions vs ON vs.id = gr.submission_id
+                    WHERE gr.tenant_id = $1
+                    ORDER BY gr.submission_id, gr.problem_id, gr.attempt_number DESC
+                )
+                SELECT
+                    (SELECT COUNT(*) FROM visible_submissions) AS total_submissions,
+                    COUNT(*) AS total_results,
+                    COUNT(*) FILTER (WHERE is_correct IS TRUE) AS correct_results,
+                    COUNT(*) FILTER (WHERE routed_to_human) AS human_review_results
+                FROM latest
+                """,
+                user.tenant_id,
+                class_ids,
+                normalized_assignment_id,
+                cutoff,
+            )
+            error_rows = await connection.fetch(
+                """
+                WITH visible_submissions AS (
+                    SELECT DISTINCT s.id
+                    FROM submissions s
+                    JOIN assignment_classes ac ON ac.tenant_id = s.tenant_id AND ac.assignment_id = s.assignment_id
+                    WHERE s.tenant_id = $1
+                      AND ac.class_id = ANY($2::uuid[])
+                      AND ($3::uuid IS NULL OR s.assignment_id = $3::uuid)
+                      AND s.submitted_at >= $4
+                ),
+                latest AS (
+                    SELECT DISTINCT ON (gr.submission_id, gr.problem_id) gr.error_type
+                    FROM grading_results gr
+                    JOIN visible_submissions vs ON vs.id = gr.submission_id
+                    WHERE gr.tenant_id = $1
+                    ORDER BY gr.submission_id, gr.problem_id, gr.attempt_number DESC
+                )
+                SELECT error_type, COUNT(*) AS count
+                FROM latest
+                WHERE error_type IS NOT NULL
+                GROUP BY error_type
+                ORDER BY count DESC, error_type
+                """,
+                user.tenant_id,
+                class_ids,
+                normalized_assignment_id,
+                cutoff,
+            )
+            trend_rows = await connection.fetch(
+                """
+                WITH latest AS (
+                    SELECT DISTINCT ON (gr.submission_id, gr.problem_id)
+                           date_trunc('week', s.submitted_at)::date AS bucket,
+                           gr.is_correct
+                    FROM submissions s
+                    JOIN assignment_classes ac ON ac.tenant_id = s.tenant_id AND ac.assignment_id = s.assignment_id
+                    JOIN grading_results gr ON gr.tenant_id = s.tenant_id AND gr.submission_id = s.id
+                    WHERE s.tenant_id = $1
+                      AND ac.class_id = ANY($2::uuid[])
+                      AND ($3::uuid IS NULL OR s.assignment_id = $3::uuid)
+                      AND s.submitted_at >= $4
+                    ORDER BY gr.submission_id, gr.problem_id, gr.attempt_number DESC
+                )
+                SELECT bucket, COUNT(*) AS total_results, COUNT(*) FILTER (WHERE is_correct IS TRUE) AS correct_results
+                FROM latest
+                GROUP BY bucket
+                ORDER BY bucket
+                """,
+                user.tenant_id,
+                class_ids,
+                normalized_assignment_id,
+                cutoff,
+            )
+        total_submissions = int(overview["total_submissions"] or 0)
+        total_results = int(overview["total_results"] or 0)
+        correct_results = int(overview["correct_results"] or 0)
+        human_review_results = int(overview["human_review_results"] or 0)
+        expected_submissions = total_students * (assignment_count or (1 if normalized_assignment_id else 0))
+        return {
+            "class_name": class_name,
+            "period": {
+                "days": days,
+                "start_date": cutoff.date().isoformat(),
+                "end_date": datetime.now(UTC).date().isoformat(),
+            },
+            "overview": {
+                "total_submissions": total_submissions,
+                "average_accuracy": round(correct_results / total_results, 3) if total_results else 0.0,
+                "submission_rate": round(total_submissions / expected_submissions, 3) if expected_submissions else 0.0,
+                "human_review_rate": round(human_review_results / total_results, 3) if total_results else 0.0,
+            },
+            "error_distribution": {row["error_type"]: int(row["count"]) for row in error_rows},
+            "knowledge_point_alerts": [],
+            "students_needing_attention": [],
+            "pending_review_count": human_review_results,
+            "accuracy_trend": [
+                {
+                    "week": row["bucket"].isoformat(),
+                    "accuracy": round(int(row["correct_results"] or 0) / int(row["total_results"] or 1), 3),
+                }
+                for row in trend_rows
+            ],
+        }
+
+    async def student_analytics(self, user: User, student_id: str, *, days: int) -> JsonDict:
+        normalized_student_id = self._uuid_text(student_id, "student_id")
+        cutoff = datetime.now(UTC) - timedelta(days=days)
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            student = await connection.fetchrow(
+                """
+                SELECT u.id, u.display_name, u.grade_level,
+                       array_agg(DISTINCT c.name ORDER BY c.name) AS class_names,
+                       array_agg(DISTINCT cs.class_id ORDER BY cs.class_id) AS class_ids
+                FROM users u
+                JOIN class_students cs ON cs.tenant_id = u.tenant_id AND cs.student_id = u.id AND cs.is_active
+                JOIN classes c ON c.tenant_id = cs.tenant_id AND c.id = cs.class_id AND NOT c.is_deleted
+                WHERE u.tenant_id = $1 AND u.id = $2 AND u.role = 'student' AND NOT u.is_deleted
+                GROUP BY u.id, u.display_name, u.grade_level
+                """,
+                user.tenant_id,
+                normalized_student_id,
+            )
+            if student is None:
+                raise AppError(404, 4004, "学生不存在")
+            class_ids = {str(value) for value in student["class_ids"]}
+            if user.role == "teacher" and not (set(user.class_ids) & class_ids):
+                raise AppError(403, 4003, "权限不足")
+            overview = await connection.fetchrow(
+                """
+                WITH visible_submissions AS (
+                    SELECT id, submitted_at
+                    FROM submissions
+                    WHERE tenant_id = $1 AND student_id = $2 AND submitted_at >= $3
+                ),
+                latest AS (
+                    SELECT DISTINCT ON (gr.submission_id, gr.problem_id)
+                           gr.submission_id, gr.problem_id, gr.is_correct, gr.error_type, sa.hint_level
+                    FROM grading_results gr
+                    JOIN visible_submissions vs ON vs.id = gr.submission_id
+                    LEFT JOIN submission_answers sa
+                      ON sa.tenant_id = gr.tenant_id
+                     AND sa.submission_id = gr.submission_id
+                     AND sa.problem_id = gr.problem_id
+                     AND sa.attempt_number = gr.attempt_number
+                    WHERE gr.tenant_id = $1
+                    ORDER BY gr.submission_id, gr.problem_id, gr.attempt_number DESC
+                )
+                SELECT
+                    (SELECT COUNT(*) FROM visible_submissions) AS total_submissions,
+                    COUNT(*) AS total_results,
+                    COUNT(*) FILTER (WHERE is_correct IS TRUE) AS correct_results,
+                    COUNT(*) FILTER (WHERE is_correct IS FALSE) AS wrong_results,
+                    COALESCE(SUM(hint_level), 0) AS total_hints_used,
+                    COUNT(*) FILTER (WHERE hint_level > 0) AS hinted_results,
+                    COUNT(*) FILTER (WHERE hint_level >= 3) AS max_hint_reached_count
+                FROM latest
+                """,
+                user.tenant_id,
+                normalized_student_id,
+                cutoff,
+            )
+            error_rows = await connection.fetch(
+                """
+                WITH latest AS (
+                    SELECT DISTINCT ON (gr.submission_id, gr.problem_id) gr.error_type
+                    FROM submissions s
+                    JOIN grading_results gr ON gr.tenant_id = s.tenant_id AND gr.submission_id = s.id
+                    WHERE s.tenant_id = $1 AND s.student_id = $2 AND s.submitted_at >= $3
+                    ORDER BY gr.submission_id, gr.problem_id, gr.attempt_number DESC
+                )
+                SELECT error_type, COUNT(*) AS count
+                FROM latest
+                WHERE error_type IS NOT NULL
+                GROUP BY error_type
+                ORDER BY count DESC, error_type
+                """,
+                user.tenant_id,
+                normalized_student_id,
+                cutoff,
+            )
+            trend_rows = await connection.fetch(
+                """
+                WITH latest AS (
+                    SELECT DISTINCT ON (gr.submission_id, gr.problem_id)
+                           s.submitted_at::date AS bucket,
+                           gr.is_correct
+                    FROM submissions s
+                    JOIN grading_results gr ON gr.tenant_id = s.tenant_id AND gr.submission_id = s.id
+                    WHERE s.tenant_id = $1 AND s.student_id = $2 AND s.submitted_at >= $3
+                    ORDER BY gr.submission_id, gr.problem_id, gr.attempt_number DESC
+                )
+                SELECT bucket, COUNT(*) AS total_results, COUNT(*) FILTER (WHERE is_correct IS TRUE) AS correct_results
+                FROM latest
+                GROUP BY bucket
+                ORDER BY bucket
+                """,
+                user.tenant_id,
+                normalized_student_id,
+                cutoff,
+            )
+            weak_rows = await connection.fetch(
+                """
+                WITH latest_wrong AS (
+                    SELECT DISTINCT ON (gr.submission_id, gr.problem_id)
+                           p.tags, gr.error_type, s.submitted_at
+                    FROM submissions s
+                    JOIN grading_results gr ON gr.tenant_id = s.tenant_id AND gr.submission_id = s.id
+                    JOIN problems p ON p.tenant_id = gr.tenant_id AND p.id = gr.problem_id
+                    WHERE s.tenant_id = $1
+                      AND s.student_id = $2
+                      AND s.submitted_at >= $3
+                      AND gr.is_correct IS FALSE
+                    ORDER BY gr.submission_id, gr.problem_id, gr.attempt_number DESC
+                )
+                SELECT COALESCE(NULLIF(tag, ''), error_type, 'unknown') AS point,
+                       COUNT(*) AS error_count,
+                       MAX(submitted_at) AS last_error_at
+                FROM latest_wrong
+                LEFT JOIN LATERAL unnest(tags) AS tag ON true
+                GROUP BY point
+                ORDER BY error_count DESC, point
+                LIMIT 5
+                """,
+                user.tenant_id,
+                normalized_student_id,
+                cutoff,
+            )
+        total_results = int(overview["total_results"] or 0)
+        correct_results = int(overview["correct_results"] or 0)
+        wrong_results = int(overview["wrong_results"] or 0)
+        total_hints_used = int(overview["total_hints_used"] or 0)
+        return {
+            "student_name": student["display_name"],
+            "grade_level": student["grade_level"],
+            "class_name": "、".join(student["class_names"] or []),
+            "period_days": days,
+            "total_submissions": int(overview["total_submissions"] or 0),
+            "total_problems_answered": total_results,
+            "overall_accuracy": round(correct_results / total_results, 3) if total_results else 0.0,
+            "accuracy_trend": [
+                {
+                    "date": row["bucket"].isoformat(),
+                    "accuracy": round(int(row["correct_results"] or 0) / int(row["total_results"] or 1), 3),
+                    "problems_count": int(row["total_results"] or 0),
+                }
+                for row in trend_rows
+            ],
+            "weak_knowledge_points": [
+                {
+                    "point": row["point"],
+                    "error_count": int(row["error_count"]),
+                    "last_error_at": row["last_error_at"].isoformat(),
+                    "trend": "stable",
+                }
+                for row in weak_rows
+            ],
+            "hint_usage": {
+                "total_hints_used": total_hints_used,
+                "hint_dependency_rate": round(int(overview["hinted_results"] or 0) / total_results, 3)
+                if total_results
+                else 0.0,
+                "max_hint_reached_count": int(overview["max_hint_reached_count"] or 0),
+                "average_hints_per_wrong_answer": round(total_hints_used / wrong_results, 3) if wrong_results else 0.0,
+            },
+            "error_type_breakdown": {row["error_type"]: int(row["count"]) for row in error_rows},
+        }
+
+    @staticmethod
+    def _empty_teacher_dashboard(class_name: str, days: int, cutoff: datetime) -> JsonDict:
+        return {
+            "class_name": class_name,
+            "period": {
+                "days": days,
+                "start_date": cutoff.date().isoformat(),
+                "end_date": datetime.now(UTC).date().isoformat(),
+            },
+            "overview": {
+                "total_submissions": 0,
+                "average_accuracy": 0.0,
+                "submission_rate": 0.0,
+                "human_review_rate": 0.0,
+            },
+            "error_distribution": {},
+            "knowledge_point_alerts": [],
+            "students_needing_attention": [],
+            "pending_review_count": 0,
+            "accuracy_trend": [],
         }
 
     def _public_review(self, row: Mapping[str, Any]) -> JsonDict:

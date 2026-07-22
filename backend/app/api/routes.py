@@ -818,6 +818,32 @@ async def hint(
     return envelope(request, data)
 
 
+@router.get("/teacher/dashboard")
+async def teacher_dashboard(
+    request: Request,
+    class_id: str | None = None,
+    assignment_id: str | None = None,
+    days: int = Query(30, ge=1, le=365),
+    user: User = Depends(require_roles("teacher", "admin", "sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    return envelope(
+        request,
+        await repository.teacher_dashboard(user, class_id=class_id, assignment_id=assignment_id, days=days),
+    )
+
+
+@router.get("/teacher/students/{student_id}/analytics")
+async def student_analytics(
+    student_id: str,
+    request: Request,
+    days: int = Query(30, ge=1, le=365),
+    user: User = Depends(require_roles("teacher", "admin", "sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    return envelope(request, await repository.student_analytics(user, student_id, days=days))
+
+
 @router.get("/teacher/human-review-queue")
 async def review_queue(
     request: Request,

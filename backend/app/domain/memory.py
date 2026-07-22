@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -548,6 +548,258 @@ class InMemoryRepository:
             },
             "performance": {"avg_grading_latency_ms": 0, "p95_grading_latency_ms": 0},
         }
+
+    async def teacher_dashboard(
+        self, user: User, *, class_id: str | None, assignment_id: str | None, days: int
+    ) -> JsonDict:
+        from app.core.errors import AppError
+
+        if class_id is not None:
+            class_item = self.classes.get(class_id)
+            if class_item is None or class_item["tenant_id"] != user.tenant_id:
+                raise AppError(404, 4004, "班级不存在")
+            if user.role == "teacher" and class_id not in user.class_ids:
+                raise AppError(403, 4003, "权限不足")
+            visible_class_ids = {class_id}
+            class_name = str(class_item["class_name"])
+        elif user.role == "teacher":
+            visible_class_ids = set(user.class_ids)
+            class_name = "、".join(self.class_name(user.tenant_id, value) for value in sorted(visible_class_ids))
+        else:
+            visible_class_ids = {
+                value
+                for value, item in self.classes.items()
+                if item["tenant_id"] == user.tenant_id and not item.get("is_deleted")
+            }
+            class_name = "全校"
+
+        cutoff = utcnow() - timedelta(days=days)
+        submissions = [
+            submission
+            for submission in self.submissions.values()
+            if submission["tenant_id"] == user.tenant_id
+            and bool(set(submission["class_ids"]) & visible_class_ids)
+            and (assignment_id is None or submission["assignment_id"] == assignment_id)
+            and self._as_datetime(submission["submitted_at"]) >= cutoff
+        ]
+        if assignment_id is not None:
+            assignment = self.assignments.get(assignment_id)
+            if (
+                assignment is None
+                or assignment["tenant_id"] != user.tenant_id
+                or not bool(set(assignment["class_ids"]) & visible_class_ids)
+            ):
+                raise AppError(404, 4004, "作业不存在")
+
+        latest_results = [result for submission in submissions for result in submission["results"]]
+        total_students = sum(
+            item.tenant_id == user.tenant_id
+            and item.role == "student"
+            and bool(set(item.class_ids) & visible_class_ids)
+            for item in self.users.values()
+        )
+        expected_submission_count = total_students
+        if assignment_id is None:
+            assignment_count = sum(
+                item["tenant_id"] == user.tenant_id and bool(set(item["class_ids"]) & visible_class_ids)
+                for item in self.assignments.values()
+            )
+            expected_submission_count *= assignment_count
+        correct = sum(result.get("is_correct") is True for result in latest_results)
+        error_distribution = self._error_distribution(latest_results)
+        return {
+            "class_name": class_name,
+            "period": {
+                "days": days,
+                "start_date": cutoff.date().isoformat(),
+                "end_date": utcnow().date().isoformat(),
+            },
+            "overview": {
+                "total_submissions": len(submissions),
+                "average_accuracy": round(correct / len(latest_results), 3) if latest_results else 0.0,
+                "submission_rate": round(len(submissions) / expected_submission_count, 3)
+                if expected_submission_count
+                else 0.0,
+                "human_review_rate": round(
+                    sum(bool(result.get("routed_to_human")) for result in latest_results) / len(latest_results), 3
+                )
+                if latest_results
+                else 0.0,
+            },
+            "error_distribution": error_distribution,
+            "knowledge_point_alerts": self._knowledge_point_alerts(submissions),
+            "students_needing_attention": self._students_needing_attention(submissions),
+            "pending_review_count": sum(
+                review["tenant_id"] == user.tenant_id and review["status"] == "pending"
+                for review in self.reviews.values()
+            ),
+            "accuracy_trend": self._accuracy_trend(submissions),
+        }
+
+    async def student_analytics(self, user: User, student_id: str, *, days: int) -> JsonDict:
+        from app.core.errors import AppError
+
+        student = self.user_by_id(student_id)
+        if student is None or student.tenant_id != user.tenant_id or student.role != "student":
+            raise AppError(404, 4004, "学生不存在")
+        if user.role == "teacher" and not (set(user.class_ids) & set(student.class_ids)):
+            raise AppError(403, 4003, "权限不足")
+        cutoff = utcnow() - timedelta(days=days)
+        submissions = [
+            submission
+            for submission in self.submissions.values()
+            if submission["tenant_id"] == user.tenant_id
+            and submission["student_id"] == student_id
+            and self._as_datetime(submission["submitted_at"]) >= cutoff
+        ]
+        latest_results = [result for submission in submissions for result in submission["results"]]
+        correct = sum(result.get("is_correct") is True for result in latest_results)
+        wrong_results = [result for result in latest_results if result.get("is_correct") is False]
+        total_hints = sum(int(result.get("hint_level", 0)) for result in latest_results)
+        class_name = "、".join(self.class_name(user.tenant_id, value) for value in student.class_ids)
+        weak_points = []
+        for tag, info in self._weak_point_counts(submissions).items():
+            weak_points.append(
+                {
+                    "point": tag,
+                    "error_count": info["count"],
+                    "last_error_at": info["last_error_at"],
+                    "trend": "stable",
+                }
+            )
+        weak_points.sort(key=lambda item: item["error_count"], reverse=True)
+        return {
+            "student_name": student.display_name,
+            "grade_level": student.grade_level,
+            "class_name": class_name,
+            "period_days": days,
+            "total_submissions": len(submissions),
+            "total_problems_answered": len(latest_results),
+            "overall_accuracy": round(correct / len(latest_results), 3) if latest_results else 0.0,
+            "accuracy_trend": self._accuracy_trend(submissions, by_day=True),
+            "weak_knowledge_points": weak_points[:5],
+            "hint_usage": {
+                "total_hints_used": total_hints,
+                "hint_dependency_rate": round(
+                    sum(int(result.get("hint_level", 0)) > 0 for result in latest_results) / len(latest_results), 3
+                )
+                if latest_results
+                else 0.0,
+                "max_hint_reached_count": sum(int(result.get("hint_level", 0)) >= 3 for result in latest_results),
+                "average_hints_per_wrong_answer": round(total_hints / len(wrong_results), 3) if wrong_results else 0.0,
+            },
+            "error_type_breakdown": self._error_distribution(latest_results),
+        }
+
+    @staticmethod
+    def _as_datetime(value: str) -> datetime:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed
+
+    @staticmethod
+    def _error_distribution(results: list[JsonDict]) -> dict[str, int]:
+        distribution: dict[str, int] = {}
+        for result in results:
+            error_type = result.get("error_type")
+            if error_type:
+                distribution[str(error_type)] = distribution.get(str(error_type), 0) + 1
+        return distribution
+
+    def _weak_point_counts(self, submissions: list[JsonDict]) -> dict[str, JsonDict]:
+        counts: dict[str, JsonDict] = {}
+        for submission in submissions:
+            submitted_at = submission["submitted_at"]
+            for result in submission["results"]:
+                if result.get("is_correct") is not False:
+                    continue
+                problem = self.problems.get(result["problem_id"], {})
+                tags = problem.get("tags") or [result.get("error_type") or "unknown"]
+                for tag in tags:
+                    current = counts.setdefault(str(tag), {"count": 0, "last_error_at": submitted_at})
+                    current["count"] += 1
+                    if str(submitted_at) > str(current["last_error_at"]):
+                        current["last_error_at"] = submitted_at
+        return counts
+
+    def _knowledge_point_alerts(self, submissions: list[JsonDict]) -> list[JsonDict]:
+        totals: dict[str, int] = {}
+        wrong: dict[str, set[str]] = {}
+        for submission in submissions:
+            for result in submission["results"]:
+                problem = self.problems.get(result["problem_id"], {})
+                for tag in problem.get("tags") or []:
+                    totals[str(tag)] = totals.get(str(tag), 0) + 1
+                    if result.get("is_correct") is False:
+                        wrong.setdefault(str(tag), set()).add(submission["student_id"])
+        alerts: list[JsonDict] = []
+        for tag, affected_students in wrong.items():
+            total = totals.get(tag, 0)
+            error_rate = round(len(affected_students) / total, 3) if total else 0.0
+            if error_rate >= 0.4:
+                alerts.append(
+                    {
+                        "knowledge_point": tag,
+                        "error_rate": error_rate,
+                        "alert_level": "high",
+                        "alert": "超过40%学生在此知识点出错，建议重点讲解",
+                        "affected_student_count": len(affected_students),
+                    }
+                )
+        alerts.sort(key=lambda item: float(item["error_rate"]), reverse=True)
+        return alerts[:5]
+
+    def _students_needing_attention(self, submissions: list[JsonDict]) -> list[JsonDict]:
+        by_student: dict[str, list[JsonDict]] = {}
+        for submission in submissions:
+            by_student.setdefault(str(submission["student_id"]), []).extend(submission["results"])
+        students: list[JsonDict] = []
+        for student_id, results in by_student.items():
+            if not results:
+                continue
+            correct = sum(result.get("is_correct") is True for result in results)
+            recent_accuracy = round(correct / len(results), 3)
+            hint_dependency_rate = round(
+                sum(int(result.get("hint_level", 0)) > 0 for result in results) / len(results), 3
+            )
+            weak_points = [
+                error_type
+                for error_type, _count in sorted(
+                    self._error_distribution(results).items(), key=lambda item: item[1], reverse=True
+                )[:3]
+            ]
+            if recent_accuracy < 0.6 or hint_dependency_rate >= 0.5:
+                student = self.user_by_id(student_id)
+                students.append(
+                    {
+                        "student_id": student_id,
+                        "student_name": student.display_name if student else student_id,
+                        "recent_accuracy": recent_accuracy,
+                        "weak_points": weak_points,
+                        "hint_dependency_rate": hint_dependency_rate,
+                        "consecutive_wrong_count": sum(result.get("is_correct") is False for result in results),
+                    }
+                )
+        students.sort(key=lambda item: (float(item["recent_accuracy"]), -float(item["hint_dependency_rate"])))
+        return students[:10]
+
+    def _accuracy_trend(self, submissions: list[JsonDict], *, by_day: bool = False) -> list[JsonDict]:
+        buckets: dict[str, list[JsonDict]] = {}
+        for submission in submissions:
+            submitted_at = self._as_datetime(submission["submitted_at"])
+            bucket = submitted_at.date().isoformat() if by_day else submitted_at.date().isoformat()
+            buckets.setdefault(bucket, []).extend(submission["results"])
+        trend = []
+        for bucket, results in sorted(buckets.items()):
+            correct = sum(result.get("is_correct") is True for result in results)
+            item: JsonDict = {
+                "accuracy": round(correct / len(results), 3) if results else 0.0,
+                "problems_count": len(results),
+            }
+            item["date" if by_day else "week"] = bucket
+            trend.append(item)
+        return trend
 
     async def reset_user_password(self, user: User, target_user_id: str, password_hash: bytes) -> JsonDict:
         from app.core.errors import AppError
