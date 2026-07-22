@@ -1044,6 +1044,23 @@ async def review_override(
             "feedback_text": result["feedback_text"],
         }
     )
+    store.audit_logs.append(
+        {
+            "tenant_id": user.tenant_id,
+            "operator_id": user.user_id,
+            "action": "GRADE_OVERRIDE",
+            "resource_type": "human_review",
+            "resource_id": review_id,
+            "result": "success",
+            "detail": {
+                "submission_id": submission["submission_id"],
+                "problem_id": result["problem_id"],
+                "override_correct": payload.override_correct,
+                "is_training_example": payload.is_training_example,
+            },
+            "created_at": iso_now(),
+        }
+    )
     return envelope(
         request,
         {

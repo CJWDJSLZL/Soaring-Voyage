@@ -2115,6 +2115,24 @@ class PostgresIdentityProblemRepository:
                 payload["is_training_example"],
             )
             await self._set_submission_status(connection, user.tenant_id, str(row["submission_id"]), reviewed=True)
+            await connection.execute(
+                """
+                INSERT INTO audit_logs (tenant_id, operator_id, action, resource_type, resource_id, detail, result)
+                VALUES ($1, $2, 'GRADE_OVERRIDE', 'human_review', $3, $4::jsonb, 'success')
+                """,
+                user.tenant_id,
+                user.user_id,
+                normalized_review_id,
+                json.dumps(
+                    {
+                        "submission_id": str(row["submission_id"]),
+                        "problem_id": str(row["problem_id"]),
+                        "override_correct": payload["override_correct"],
+                        "is_training_example": payload["is_training_example"],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
         return {
             "review_id": normalized_review_id,
             "status": "reviewed",
