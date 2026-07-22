@@ -8,6 +8,7 @@ from app.config import Settings
 from app.domain.memory import InMemoryRepository
 from app.domain.postgres import PostgresIdentityProblemRepository
 from app.main import create_app
+from app.realtime import RedisTicketRepository
 from fastapi.testclient import TestClient
 
 TENANT = "11111111-1111-4111-8111-111111111111"
@@ -22,6 +23,17 @@ class AsyncContext:
 
     async def __aexit__(self, *_args: object) -> None:
         return None
+
+
+class FakeRedis:
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def ping(self) -> bool:
+        return True
+
+    async def aclose(self) -> None:
+        self.closed = True
 
 
 def test_memory_lifecycle_keeps_single_store_as_identity_repository() -> None:
@@ -72,6 +84,37 @@ def test_postgres_pool_repository_health_and_shutdown_lifecycle() -> None:
     assert body["services"]["database"] == "ok"
     assert body["services"]["sse_tickets"] == "development-in-memory-adapter"
     assert unported.status_code == 401
+
+
+def test_redis_ticket_repository_health_and_shutdown_lifecycle() -> None:
+    connection = AsyncMock()
+    connection.fetchval.return_value = 1
+    pool = MagicMock()
+    pool.acquire.return_value = AsyncContext(connection)
+    pool.close = AsyncMock()
+    fake_redis = FakeRedis()
+    configured = Settings(
+        app_env="test",
+        persistence_backend="postgres",
+        database_url="postgresql:///app",
+        default_tenant_id=TENANT,
+        redis_url="redis://localhost:6379/0",
+    )
+    test_app = create_app(
+        configured,
+        pool_factory=AsyncMock(return_value=pool),
+        redis_factory=MagicMock(return_value=fake_redis),
+    )
+
+    with TestClient(test_app) as client:
+        assert isinstance(test_app.state.ticket_repository, RedisTicketRepository)
+        response = client.get("/health")
+        assert fake_redis.closed is False
+
+    body = response.json()
+    assert body["services"]["sse_tickets"] == "redis"
+    assert body["services"]["redis"] == "ok"
+    assert fake_redis.closed is True
 
 
 def test_postgres_health_reports_failed_ping() -> None:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import secrets
 import time
 from collections.abc import AsyncIterator, Iterable, Iterator
 from copy import deepcopy
@@ -276,15 +275,16 @@ async def sse_ticket(
         await repository.submission_detail(user, payload.submission_id)
     else:
         get_visible_submission(store, payload.submission_id, user)
-    store.purge_expired_tickets()
-    value = secrets.token_urlsafe(32)
     configured = request.app.state.settings
-    store.tickets[value] = Ticket(
-        user.user_id,
-        user.tenant_id,
-        payload.submission_id,
-        user.role,
-        utcnow() + timedelta(seconds=configured.sse_ticket_ttl_seconds),
+    value = await request.app.state.ticket_repository.issue(
+        Ticket(
+            user.user_id,
+            user.tenant_id,
+            payload.submission_id,
+            user.role,
+            utcnow() + timedelta(seconds=configured.sse_ticket_ttl_seconds),
+        ),
+        configured.sse_ticket_ttl_seconds,
     )
     return envelope(request, {"ticket": value, "expires_in": configured.sse_ticket_ttl_seconds})
 
@@ -978,9 +978,8 @@ async def submission_events(
     store: Repository = Depends(get_store),
     repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
-    store.purge_expired_tickets()
-    ticket = store.tickets.pop(sse_ticket, None)
-    if ticket is None or ticket.expires_at <= utcnow() or ticket.submission_id != submission_id:
+    ticket = await request.app.state.ticket_repository.consume(sse_ticket)
+    if ticket is None or ticket.submission_id != submission_id:
         raise AppError(401, 4001, "SSE 票据无效或已过期")
     if request.app.state.settings.persistence_backend == "postgres":
         return StreamingResponse(

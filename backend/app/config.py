@@ -45,6 +45,7 @@ class Settings:
     persistence_backend: str = field(default_factory=lambda: os.getenv("PERSISTENCE_BACKEND", "memory").strip().lower())
     database_url: str | None = field(default_factory=lambda: os.getenv("DATABASE_URL") or None)
     default_tenant_id: str | None = field(default_factory=lambda: os.getenv("DEFAULT_TENANT_ID") or None)
+    redis_url: str | None = field(default_factory=lambda: os.getenv("REDIS_URL") or None)
     deepseek_api_key: str | None = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY") or None)
     llm_base_url: str = field(default_factory=lambda: os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1"))
     llm_primary_model: str = field(default_factory=lambda: os.getenv("LLM_PRIMARY_MODEL", "deepseek-v4-flash"))
@@ -77,9 +78,13 @@ class Settings:
                 raise RuntimeError(
                     "SECRET_KEY must be a strong value of at least 32 characters outside test/development"
                 )
+            if self.persistence_backend != "postgres" or not self.redis_url:
+                raise RuntimeError(
+                    "Production startup refused: configure PostgreSQL and Redis adapters before selecting "
+                    "APP_ENV outside test/development"
+                )
             raise RuntimeError(
-                "Production startup refused: the executable API still uses in-memory repository/ticket adapters; "
-                "configure PostgreSQL/Redis adapters before selecting APP_ENV outside test/development"
+                "Production startup refused: Qdrant/RAG and deployment gates remain not wired for production"
             )
         if not self.jwt_secret:
             object.__setattr__(self, "jwt_secret", "phase1-development-secret-change-me")
