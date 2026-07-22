@@ -3,12 +3,13 @@ from __future__ import annotations
 import json
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
 import asyncpg
 
+from app.core.errors import AppError
 from app.db.session import tenant_conn, tenant_context
 from app.domain.models import JsonDict, User
 
@@ -263,3 +264,231 @@ class PostgresIdentityProblemRepository:
             "page_size": page_size,
             "has_next": start + page_size < count,
         }
+
+    @staticmethod
+    def _page(items: list[JsonDict], page_number: int, page_size: int) -> JsonDict:
+        total = len(items)
+        start = (page_number - 1) * page_size
+        return {
+            "items": items[start : start + page_size],
+            "total": total,
+            "page": page_number,
+            "page_size": page_size,
+            "has_next": start + page_size < total,
+        }
+
+    @staticmethod
+    def _assignment_status(due_date: datetime | None) -> str:
+        if due_date is None:
+            return "active"
+        due = due_date if due_date.tzinfo else due_date.replace(tzinfo=UTC)
+        return "expired" if due <= datetime.now(UTC) else "active"
+
+    async def create_assignment(self, user: User, payload: dict[str, Any]) -> JsonDict:
+        class_ids = list(payload["class_ids"])
+        problem_ids = list(payload["problem_ids"])
+        if len(class_ids) != len(set(class_ids)):
+            raise AppError(422, 4022, "请求参数校验失败", "class_ids must be unique")
+        if len(problem_ids) != len(set(problem_ids)):
+            raise AppError(422, 4022, "请求参数校验失败", "problem_ids must be unique")
+        if user.role == "teacher" and not set(class_ids).issubset(set(user.class_ids)):
+            raise AppError(403, 4003, "教师只能向本人班级布置作业")
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            class_rows = await connection.fetch(
+                """
+                SELECT id, name FROM classes
+                WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND NOT is_deleted
+                ORDER BY id
+                """,
+                user.tenant_id,
+                class_ids,
+            )
+            found_classes = {str(row["id"]): row["name"] for row in class_rows}
+            if set(found_classes) != set(class_ids):
+                raise AppError(404, 4004, "班级不存在")
+            problem_rows = await connection.fetch(
+                """
+                SELECT id FROM problems
+                WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND NOT is_deleted
+                """,
+                user.tenant_id,
+                problem_ids,
+            )
+            found_problem_ids = {str(row["id"]) for row in problem_rows}
+            missing = [item for item in problem_ids if item not in found_problem_ids]
+            if missing:
+                raise AppError(404, 4004, "题目不存在", f"Missing problem ids: {missing}")
+            assignment_id = await connection.fetchval(
+                """
+                INSERT INTO assignments (tenant_id, title, due_date, created_by)
+                VALUES ($1, $2, $3, $4)
+                RETURNING id
+                """,
+                user.tenant_id,
+                payload["title"],
+                payload.get("due_date"),
+                user.user_id,
+            )
+            for class_id in class_ids:
+                await connection.execute(
+                    """
+                    INSERT INTO assignment_classes (tenant_id, assignment_id, class_id)
+                    VALUES ($1, $2, $3)
+                    """,
+                    user.tenant_id,
+                    assignment_id,
+                    class_id,
+                )
+            for position, problem_id in enumerate(problem_ids, 1):
+                await connection.execute(
+                    """
+                    INSERT INTO assignment_problems (tenant_id, assignment_id, problem_id, position)
+                    VALUES ($1, $2, $3, $4)
+                    """,
+                    user.tenant_id,
+                    assignment_id,
+                    problem_id,
+                    position,
+                )
+            created_at = await connection.fetchval(
+                "SELECT created_at FROM assignments WHERE tenant_id = $1 AND id = $2",
+                user.tenant_id,
+                assignment_id,
+            )
+        due_date = payload.get("due_date")
+        return {
+            "assignment_id": str(assignment_id),
+            "title": payload["title"],
+            "classes": [{"class_id": class_id, "class_name": str(found_classes[class_id])} for class_id in class_ids],
+            "due_date": due_date.isoformat() if isinstance(due_date, datetime) else due_date,
+            "problem_count": len(problem_ids),
+            "created_at": created_at.isoformat(),
+            "status": self._assignment_status(due_date),
+        }
+
+    async def list_assignments(
+        self,
+        user: User,
+        *,
+        class_id: str | None,
+        status: str,
+        order_by: str,
+        order: str,
+        page_number: int,
+        page_size: int,
+    ) -> JsonDict:
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            rows = await connection.fetch(
+                """
+                SELECT a.id, a.title, a.due_date, a.created_at,
+                       array_agg(DISTINCT ac.class_id ORDER BY ac.class_id) AS class_ids,
+                       string_agg(DISTINCT c.name, '、' ORDER BY c.name) AS class_name,
+                       count(DISTINCT ap.problem_id) AS problem_count,
+                       s.status AS submission_status
+                FROM assignments a
+                JOIN assignment_classes ac ON ac.tenant_id = a.tenant_id AND ac.assignment_id = a.id
+                JOIN classes c ON c.tenant_id = ac.tenant_id AND c.id = ac.class_id AND NOT c.is_deleted
+                JOIN assignment_problems ap ON ap.tenant_id = a.tenant_id AND ap.assignment_id = a.id
+                LEFT JOIN submissions s
+                  ON s.tenant_id = a.tenant_id AND s.assignment_id = a.id AND s.student_id = $2
+                WHERE a.tenant_id = $1 AND NOT a.is_deleted
+                  AND ($3::uuid IS NULL OR ac.class_id = $3::uuid)
+                GROUP BY a.id, a.title, a.due_date, a.created_at, s.status
+                """,
+                user.tenant_id,
+                user.user_id,
+                class_id,
+            )
+        visible_items: list[JsonDict] = []
+        user_class_ids = set(user.class_ids)
+        for row in rows:
+            assignment_class_ids = {str(value) for value in row["class_ids"]}
+            if user.role not in {"admin", "sysadmin"} and not (user_class_ids & assignment_class_ids):
+                continue
+            current_status = self._assignment_status(row["due_date"])
+            if status != "all" and current_status != status:
+                continue
+            due = row["due_date"].isoformat() if row["due_date"] else None
+            item = {
+                "assignment_id": str(row["id"]),
+                "title": row["title"],
+                "class_name": row["class_name"],
+                "due_date": due,
+                "problem_count": int(row["problem_count"]),
+                "status": current_status,
+                "is_expiring_soon": False,
+                "created_at": row["created_at"].isoformat(),
+            }
+            if user.role == "student":
+                item["submission_status"] = row["submission_status"] or "not_submitted"
+            visible_items.append(item)
+        reverse = order == "desc"
+        visible_items.sort(key=lambda item: str(item.get(order_by) or ""), reverse=reverse)
+        return self._page(visible_items, page_number, page_size)
+
+    async def assignment_detail(self, user: User, assignment_id: str) -> JsonDict:
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            assignment = await connection.fetchrow(
+                """
+                SELECT a.id, a.title, a.due_date,
+                       array_agg(DISTINCT ac.class_id ORDER BY ac.class_id) AS class_ids,
+                       string_agg(DISTINCT c.name, '、' ORDER BY c.name) AS class_name,
+                       s.id AS submission_id, s.status AS submission_status
+                FROM assignments a
+                JOIN assignment_classes ac ON ac.tenant_id = a.tenant_id AND ac.assignment_id = a.id
+                JOIN classes c ON c.tenant_id = ac.tenant_id AND c.id = ac.class_id AND NOT c.is_deleted
+                LEFT JOIN submissions s
+                  ON s.tenant_id = a.tenant_id AND s.assignment_id = a.id AND s.student_id = $3
+                WHERE a.tenant_id = $1 AND a.id = $2 AND NOT a.is_deleted
+                GROUP BY a.id, a.title, a.due_date, s.id, s.status
+                """,
+                user.tenant_id,
+                assignment_id,
+                user.user_id,
+            )
+            if assignment is None:
+                raise AppError(404, 4004, "作业不存在")
+            assignment_class_ids = {str(value) for value in assignment["class_ids"]}
+            if user.role not in {"admin", "sysadmin"} and not (set(user.class_ids) & assignment_class_ids):
+                raise AppError(404, 4004, "作业不存在")
+            rows = await connection.fetch(
+                """
+                SELECT p.id, p.problem_text, p.problem_type, p.grade_level, p.difficulty, p.tags,
+                       ap.position
+                FROM assignment_problems ap
+                JOIN problems p ON p.id = ap.problem_id AND p.tenant_id = ap.tenant_id AND NOT p.is_deleted
+                WHERE ap.tenant_id = $1 AND ap.assignment_id = $2
+                ORDER BY ap.position
+                """,
+                user.tenant_id,
+                assignment_id,
+            )
+        fields = ["problem_id", "problem_text", "problem_type", "grade_level", "difficulty", "tags"]
+        if user.role == "student":
+            fields = ["problem_id", "problem_text", "problem_type", "difficulty"]
+        problems = []
+        for row in rows:
+            problem = {
+                "problem_id": str(row["id"]),
+                "problem_text": row["problem_text"],
+                "problem_type": row["problem_type"],
+                "grade_level": row["grade_level"],
+                "difficulty": row["difficulty"],
+                "tags": list(row["tags"] or []),
+            }
+            problems.append({"sequence": row["position"], **{key: problem[key] for key in fields}})
+        data = {
+            "assignment_id": assignment_id,
+            "title": assignment["title"],
+            "class_name": assignment["class_name"],
+            "due_date": assignment["due_date"].isoformat() if assignment["due_date"] else None,
+            "status": self._assignment_status(assignment["due_date"]),
+            "problems": problems,
+        }
+        if user.role == "student":
+            data["my_submission"] = (
+                {"submission_id": str(assignment["submission_id"]), "status": assignment["submission_status"]}
+                if assignment["submission_id"]
+                else None
+            )
+        return data

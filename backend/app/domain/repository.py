@@ -29,7 +29,7 @@ class Repository(Protocol):
 
 
 class IdentityProblemRepository(Protocol):
-    """Async boundary for authentication and the problem catalog only."""
+    """Async boundary for migrated PostgreSQL-backed workflows."""
 
     async def identity_by_username(self, username: str) -> User | None: ...
     async def identity_by_id(self, user_id: str, tenant_id: str, role: str) -> User | None: ...
@@ -49,3 +49,16 @@ class IdentityProblemRepository(Protocol):
         page_number: int,
         page_size: int,
     ) -> JsonDict: ...
+    async def create_assignment(self, user: User, payload: dict[str, Any]) -> JsonDict: ...
+    async def list_assignments(
+        self,
+        user: User,
+        *,
+        class_id: str | None,
+        status: str,
+        order_by: str,
+        order: str,
+        page_number: int,
+        page_size: int,
+    ) -> JsonDict: ...
+    async def assignment_detail(self, user: User, assignment_id: str) -> JsonDict: ...
