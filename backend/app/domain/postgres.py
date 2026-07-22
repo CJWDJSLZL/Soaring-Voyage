@@ -264,8 +264,9 @@ class PostgresIdentityProblemRepository:
     def problem_from_row(cls, row: Mapping[str, Any]) -> JsonDict:
         return {
             "problem_id": str(row["id"]),
-            "tenant_id": str(row["tenant_id"]),
-            "created_by": str(row["created_by"]),
+            "tenant_id": str(row["tenant_id"]) if row["tenant_id"] is not None else None,
+            "source": "public" if row["tenant_id"] is None else "school",
+            "created_by": str(row["created_by"]) if row["created_by"] is not None else None,
             "problem_type": row["problem_type"],
             "grade_level": row["grade_level"],
             "difficulty": row["difficulty"],
@@ -286,11 +287,19 @@ class PostgresIdentityProblemRepository:
         problem_type: str | None,
         difficulty: str | None,
         keyword: str | None,
+        tags: list[str],
+        source: str,
         page_number: int,
         page_size: int,
     ) -> JsonDict:
-        where = ["tenant_id = $1", "NOT is_deleted"]
+        where = ["NOT is_deleted"]
         arguments: list[Any] = [user.tenant_id]
+        if source == "school":
+            where.append("tenant_id = $1")
+        elif source == "public":
+            where.append("tenant_id IS NULL")
+        else:
+            where.append("(tenant_id = $1 OR tenant_id IS NULL)")
         for column, value in (
             ("grade_level", grade_level),
             ("problem_type", problem_type),
@@ -302,6 +311,9 @@ class PostgresIdentityProblemRepository:
         if keyword is not None:
             arguments.append(f"%{keyword}%")
             where.append(f"problem_text ILIKE ${len(arguments)}")
+        if tags:
+            arguments.append(tags)
+            where.append(f"tags @> ${len(arguments)}::varchar[]")
         predicate = " AND ".join(where)
         async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
             # The predicate contains only fixed column names above; all caller

@@ -376,6 +376,8 @@ async def list_problems(
     grade_level: int | None = Query(None, ge=1, le=6),
     problem_type: str | None = None,
     difficulty: str | None = None,
+    tag: list[str] = Query(default_factory=list),
+    source: Literal["public", "school", "all"] = "all",
     keyword: str | None = None,
     page_number: int = Query(1, alias="page", ge=1),
     page_size: int = Query(20, ge=1, le=100),
@@ -388,6 +390,8 @@ async def list_problems(
         problem_type=problem_type,
         difficulty=difficulty,
         keyword=keyword,
+        tags=tag,
+        source=source,
         page_number=page_number,
         page_size=page_size,
     )

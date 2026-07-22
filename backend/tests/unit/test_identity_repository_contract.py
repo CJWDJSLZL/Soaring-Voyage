@@ -69,6 +69,8 @@ async def test_memory_repository_problem_contract_is_tenant_scoped_filtered_and_
         problem_type="arithmetic",
         difficulty=None,
         keyword="FRACTION",
+        tags=["fraction"],
+        source="school",
         page_number=1,
         page_size=1,
     )

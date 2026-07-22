@@ -272,14 +272,17 @@ async def test_problem_insert_and_list_are_tenant_scoped_and_deterministically_o
         problem_type="arithmetic",
         difficulty="easy",
         keyword="1+",
+        tags=["addition"],
+        source="all",
         page_number=1,
         page_size=20,
     )
     list_sql = connection.fetch.await_args.args[0]
     count_sql = connection.fetchval.await_args_list[1].args[0]
-    assert "tenant_id = $1" in list_sql
+    assert "(tenant_id = $1 OR tenant_id IS NULL)" in list_sql
+    assert "tags @>" in list_sql
     assert "ORDER BY created_at DESC, id DESC" in list_sql
-    assert "tenant_id = $1" in count_sql
+    assert "(tenant_id = $1 OR tenant_id IS NULL)" in count_sql
     assert result["items"][0]["problem_id"] == str(problem_id)
     assert result["items"][0]["created_at"] == created_at.isoformat()
     assert result["total"] == 1

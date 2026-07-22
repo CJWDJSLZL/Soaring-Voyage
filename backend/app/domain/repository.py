@@ -53,6 +53,8 @@ class IdentityProblemRepository(Protocol):
         problem_type: str | None,
         difficulty: str | None,
         keyword: str | None,
+        tags: list[str],
+        source: str,
         page_number: int,
         page_size: int,
     ) -> JsonDict: ...

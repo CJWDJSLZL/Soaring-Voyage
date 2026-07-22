@@ -160,6 +160,52 @@ def test_teacher_bulk_import_problems_from_csv(client: TestClient):
     assert job.status_code == 403
 
 
+def test_teacher_filters_problem_bank_by_tag_and_source(client: TestClient):
+    teacher = login(client, "teacher")
+    public_id = "public-problem"
+    school_id = "school-problem"
+    base_problem = {
+        "created_by": None,
+        "problem_type": "arithmetic",
+        "reference_answer": "4",
+        "grade_level": 2,
+        "difficulty": "easy",
+        "curriculum_version": "renjiao",
+        "solution_steps": [],
+        "common_errors": [],
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    app.state.store.problems[public_id] = {
+        **base_problem,
+        "problem_id": public_id,
+        "tenant_id": None,
+        "problem_text": "public problem: 2 + 2 = ___",
+        "tags": ["addition", "public"],
+    }
+    app.state.store.problems[school_id] = {
+        **base_problem,
+        "problem_id": school_id,
+        "tenant_id": "tenant-demo",
+        "created_by": "user-teacher",
+        "problem_text": "school problem: 3 + 4 = ___",
+        "reference_answer": "7",
+        "tags": ["addition", "school"],
+    }
+
+    all_addition = client.get("/api/v1/problems/?grade_level=2&tag=addition", headers=auth(teacher))
+    school_only = client.get("/api/v1/problems/?grade_level=2&tag=school&source=school", headers=auth(teacher))
+    public_only = client.get("/api/v1/problems/?grade_level=2&tag=public&source=public", headers=auth(teacher))
+
+    assert all_addition.status_code == 200
+    assert school_only.status_code == 200
+    assert public_only.status_code == 200
+    assert {item["problem_id"] for item in all_addition.json()["data"]["items"]} >= {public_id, school_id}
+    assert [item["problem_id"] for item in school_only.json()["data"]["items"]] == [school_id]
+    assert school_only.json()["data"]["items"][0]["source"] == "school"
+    assert [item["problem_id"] for item in public_only.json()["data"]["items"]] == [public_id]
+    assert public_only.json()["data"]["items"][0]["source"] == "public"
+
+
 def test_teacher_downloads_problem_import_template(client: TestClient):
     teacher = login(client, "teacher")
     student = login(client, "student")

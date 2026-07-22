@@ -191,23 +191,37 @@ class InMemoryRepository:
         problem_type: str | None,
         difficulty: str | None,
         keyword: str | None,
+        tags: list[str],
+        source: str,
         page_number: int,
         page_size: int,
     ) -> JsonDict:
-        items = [
-            item
-            for item in self.problems.values()
-            if item.get("tenant_id") == user.tenant_id and not item.get("is_deleted")
-        ]
+        items = [item for item in self.problems.values() if not item.get("is_deleted")]
+        if source == "school":
+            items = [item for item in items if item.get("tenant_id") == user.tenant_id]
+        elif source == "public":
+            items = [item for item in items if item.get("tenant_id") is None]
+        else:
+            items = [item for item in items if item.get("tenant_id") in {None, user.tenant_id}]
         if grade_level is not None:
             items = [item for item in items if item["grade_level"] == grade_level]
         if problem_type is not None:
             items = [item for item in items if item["problem_type"] == problem_type]
         if difficulty is not None:
             items = [item for item in items if item["difficulty"] == difficulty]
+        if tags:
+            expected_tags = set(tags)
+            items = [item for item in items if expected_tags.issubset(set(item.get("tags", [])))]
         if keyword is not None:
             lowered = keyword.lower()
             items = [item for item in items if lowered in str(item["problem_text"]).lower()]
+        items = [
+            {
+                **item,
+                "source": "public" if item.get("tenant_id") is None else "school",
+            }
+            for item in items
+        ]
         items.sort(key=lambda item: (str(item.get("created_at", "")), str(item["problem_id"])), reverse=True)
         return self._page(items, page_number, page_size)
 

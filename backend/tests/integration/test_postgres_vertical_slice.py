@@ -120,6 +120,8 @@ async def test_runtime_role_rls_identity_token_version_and_problem_persistence()
             problem_type="arithmetic",
             difficulty=None,
             keyword="integration 1 + 1",
+            tags=["integration"],
+            source="school",
             page_number=1,
             page_size=20,
         )
