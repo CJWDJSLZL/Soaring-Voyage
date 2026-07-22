@@ -1416,6 +1416,95 @@ class PostgresIdentityProblemRepository:
             "created_at": row["created_at"].isoformat(),
         }
 
+    async def bulk_create_students(self, user: User, rows: list[dict[str, Any]]) -> JsonDict:
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            class_rows = await connection.fetch(
+                """
+                SELECT id, name, grade_level
+                FROM classes
+                WHERE tenant_id = $1 AND NOT is_deleted
+                """,
+                user.tenant_id,
+            )
+            class_by_name = {str(row["name"]): row for row in class_rows}
+            created = 0
+            skipped = 0
+            failed = 0
+            skipped_reasons: list[JsonDict] = []
+            failed_rows: list[JsonDict] = []
+            seen_usernames: set[str] = set()
+            for row in rows:
+                username = row["username"]
+                class_row = class_by_name.get(row["class_name"])
+                if username in seen_usernames:
+                    failed += 1
+                    failed_rows.append(
+                        {"row": row["row"], "username": username, "reason": "file contains duplicate username"}
+                    )
+                    continue
+                seen_usernames.add(username)
+                if class_row is None:
+                    failed += 1
+                    failed_rows.append({"row": row["row"], "username": username, "reason": "class does not exist"})
+                    continue
+                if int(class_row["grade_level"]) != int(row["grade_level"]):
+                    failed += 1
+                    failed_rows.append(
+                        {"row": row["row"], "username": username, "reason": "grade does not match class"}
+                    )
+                    continue
+                existing = await connection.fetchval(
+                    "SELECT id FROM users WHERE tenant_id = $1 AND username = $2 AND NOT is_deleted",
+                    user.tenant_id,
+                    username,
+                )
+                if existing is not None:
+                    skipped += 1
+                    skipped_reasons.append(
+                        {"row": row["row"], "username": username, "reason": "username already exists"}
+                    )
+                    continue
+                student_id = await connection.fetchval(
+                    """
+                    INSERT INTO users (tenant_id, role, username, display_name, password_hash, grade_level, force_change_password)
+                    VALUES ($1, 'student', $2, $3, $4, $5, true)
+                    RETURNING id
+                    """,
+                    user.tenant_id,
+                    username,
+                    row["display_name"],
+                    row["password_hash"].decode("utf-8"),
+                    row["grade_level"],
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO class_students (tenant_id, class_id, student_id)
+                    VALUES ($1, $2, $3)
+                    ON CONFLICT (tenant_id, class_id, student_id)
+                    DO UPDATE SET is_active = true
+                    """,
+                    user.tenant_id,
+                    class_row["id"],
+                    student_id,
+                )
+                created += 1
+            await connection.execute(
+                """
+                INSERT INTO audit_logs (tenant_id, operator_id, action, resource_type, detail, result)
+                VALUES ($1, $2, 'bulk_create_students', 'user', $3::jsonb, 'success')
+                """,
+                user.tenant_id,
+                user.user_id,
+                json.dumps({"created": created, "skipped": skipped, "failed": failed}, ensure_ascii=False),
+            )
+        return {
+            "created": created,
+            "skipped": skipped,
+            "failed": failed,
+            "skipped_reasons": skipped_reasons,
+            "failed_rows": failed_rows,
+        }
+
     async def admin_stats_overview(self, user: User) -> JsonDict:
         async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
             tenant = await connection.fetchrow(

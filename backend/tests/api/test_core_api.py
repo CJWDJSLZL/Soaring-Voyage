@@ -279,3 +279,35 @@ def test_admin_classes_stats_password_reset_and_ops_jobs(client: TestClient):
     job = client.get(f"/api/v1/ops/jobs/{job_id}", headers=auth(sysadmin))
     assert job.status_code == 200
     assert job.json()["data"]["result"]["qdrant_status"] == "not_wired"
+
+
+def test_admin_bulk_create_students_from_csv(client: TestClient):
+    admin = login(client, "admin")
+    teacher = login(client, "teacher")
+    _problem_id, assignment_id = make_problem_and_assignment(client, teacher)
+    class_name = app.state.store.classes["class-3a"]["class_name"]
+    csv_body = (
+        "姓名,用户名,初始密码,年级,班级名称\n"
+        f"新同学,new_student,Import123,3,{class_name}\n"
+        f"重复学生,student,Import123,3,{class_name}\n"
+        "无班级,missing_class,Import123,3,不存在班级\n"
+    ).encode()
+
+    imported = client.post(
+        "/api/v1/admin/students/bulk-create",
+        headers=auth(admin),
+        files={"file": ("students.csv", csv_body, "text/csv")},
+    )
+
+    assert imported.status_code == 200, imported.text
+    data = imported.json()["data"]
+    assert data["created"] == 1
+    assert data["skipped"] == 1
+    assert data["failed"] == 1
+    assert data["skipped_reasons"][0]["username"] == "student"
+    assert data["failed_rows"][0]["username"] == "missing_class"
+
+    token = login(client, "new_student", "Import123")
+    detail = client.get(f"/api/v1/assignments/{assignment_id}", headers=auth(token))
+    assert detail.status_code == 200
+    assert detail.json()["data"]["assignment_id"] == assignment_id

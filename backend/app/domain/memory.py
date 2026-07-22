@@ -31,6 +31,8 @@ class InMemoryRepository:
             "class-3a": {"class_id": "class-3a", "tenant_id": "tenant-demo", "class_name": "三年级A班"},
             "class-3b": {"class_id": "class-3b", "tenant_id": "tenant-demo", "class_name": "三年级B班"},
         }
+        self._seed_classes["class-3a"]["grade_level"] = 3
+        self._seed_classes["class-3b"]["grade_level"] = 3
         self.reset()
 
     def reset(self) -> None:
@@ -313,6 +315,62 @@ class InMemoryRepository:
             "teacher_id": payload["teacher_id"],
             "academic_year": payload["academic_year"],
             "created_at": created_at,
+        }
+
+    async def bulk_create_students(self, user: User, rows: list[dict[str, Any]]) -> JsonDict:
+        class_by_name = {
+            str(item.get("class_name") or item.get("name")): (class_id, item)
+            for class_id, item in self.classes.items()
+            if item["tenant_id"] == user.tenant_id
+        }
+        created = 0
+        skipped = 0
+        failed = 0
+        skipped_reasons: list[JsonDict] = []
+        failed_rows: list[JsonDict] = []
+        seen_usernames: set[str] = set()
+        for row in rows:
+            username = row["username"]
+            class_entry = class_by_name.get(row["class_name"])
+            if username in seen_usernames:
+                failed += 1
+                failed_rows.append(
+                    {"row": row["row"], "username": username, "reason": "file contains duplicate username"}
+                )
+                continue
+            seen_usernames.add(username)
+            if class_entry is None:
+                failed += 1
+                failed_rows.append({"row": row["row"], "username": username, "reason": "class does not exist"})
+                continue
+            class_id, class_item = class_entry
+            if int(class_item["grade_level"]) != int(row["grade_level"]):
+                failed += 1
+                failed_rows.append({"row": row["row"], "username": username, "reason": "grade does not match class"})
+                continue
+            existing = self.users.get(username)
+            if existing is not None and existing.tenant_id == user.tenant_id:
+                skipped += 1
+                skipped_reasons.append({"row": row["row"], "username": username, "reason": "username already exists"})
+                continue
+            student_id = str(uuid4())
+            self.users[username] = User(
+                student_id,
+                username,
+                row["display_name"],
+                row["password_hash"],
+                "student",
+                user.tenant_id,
+                [class_id],
+                int(row["grade_level"]),
+            )
+            created += 1
+        return {
+            "created": created,
+            "skipped": skipped,
+            "failed": failed,
+            "skipped_reasons": skipped_reasons,
+            "failed_rows": failed_rows,
         }
 
     async def admin_stats_overview(self, user: User) -> JsonDict:

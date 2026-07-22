@@ -145,6 +145,57 @@ async def test_replace_password_updates_varchar_and_token_version_together() -> 
 
 
 @pytest.mark.asyncio
+async def test_bulk_create_students_inserts_users_class_links_and_audit_summary() -> None:
+    connection = AsyncMock()
+    student_id = UUID("77777777-7777-4777-8777-777777777777")
+    existing_id = UUID("88888888-8888-4888-8888-888888888888")
+    connection.fetch.return_value = [{"id": UUID(CLASS_ID), "name": "三年级A班", "grade_level": 3}]
+    connection.fetchval.side_effect = [None, student_id, existing_id]
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    admin = PostgresIdentityProblemRepository.user_from_row(user_row(role="admin", class_ids=[]))
+
+    result = await repository.bulk_create_students(
+        admin,
+        [
+            {
+                "row": 2,
+                "display_name": "张三",
+                "username": "zhangsan",
+                "password_hash": b"hash-1",
+                "grade_level": 3,
+                "class_name": "三年级A班",
+            },
+            {
+                "row": 3,
+                "display_name": "李四",
+                "username": "lisi",
+                "password_hash": b"hash-2",
+                "grade_level": 3,
+                "class_name": "三年级A班",
+            },
+            {
+                "row": 4,
+                "display_name": "王五",
+                "username": "wangwu",
+                "password_hash": b"hash-3",
+                "grade_level": 3,
+                "class_name": "不存在班级",
+            },
+        ],
+    )
+
+    assert result["created"] == 1
+    assert result["skipped"] == 1
+    assert result["failed"] == 1
+    executed_sql = "\n".join(call.args[0] for call in connection.execute.await_args_list)
+    assert "INSERT INTO class_students" in executed_sql
+    assert "INSERT INTO audit_logs" in executed_sql
+    inserted_sql = connection.fetchval.await_args_list[1].args[0]
+    assert "INSERT INTO users" in inserted_sql
+    assert connection.fetchval.await_args_list[1].args[4] == "hash-1"
+
+
+@pytest.mark.asyncio
 async def test_problem_insert_and_list_are_tenant_scoped_and_deterministically_ordered() -> None:
     connection = AsyncMock()
     problem_id = UUID("44444444-4444-4444-8444-444444444444")

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, Query, Request, Response
+from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.core.errors import AppError, envelope, utcnow
@@ -19,6 +19,7 @@ from app.domain.models import Ticket, User
 from app.domain.repository import IdentityProblemRepository, Repository
 from app.grading import DeepSeekGradingClient, GradeRequest, LLMUnavailableError, LLMVerdict, QuestionType, route_grade
 from app.harness import HarnessRunner
+from app.imports import parse_student_import
 
 from .dependencies import current_user, get_identity_repository, get_llm_grader, get_store, require_roles
 from .schemas import (
@@ -895,6 +896,42 @@ async def create_class(
     repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
     return envelope(request, await repository.create_class(user, payload.model_dump()))
+
+
+@router.post("/admin/students/bulk-create")
+async def bulk_create_students(
+    request: Request,
+    file: UploadFile = File(...),
+    user: User = Depends(require_roles("admin", "sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    try:
+        imported_rows = parse_student_import(file.filename or "students.csv", await file.read())
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AppError(422, 4022, "请求参数校验失败", str(exc)) from exc
+    rows = []
+    for row in imported_rows:
+        if len(row.username) > 100 or any(character.isspace() for character in row.username):
+            raise AppError(
+                422, 4022, "请求参数校验失败", f"row {row.row_number}: username must be 1-100 non-space chars"
+            )
+        if len(row.display_name) > 100:
+            raise AppError(
+                422, 4022, "请求参数校验失败", f"row {row.row_number}: display_name must be at most 100 chars"
+            )
+        if len(row.initial_password) < 6 or len(row.initial_password) > 128:
+            raise AppError(422, 4022, "请求参数校验失败", f"row {row.row_number}: initial_password must be 6-128 chars")
+        rows.append(
+            {
+                "row": row.row_number,
+                "display_name": row.display_name,
+                "username": row.username,
+                "password_hash": hash_password(row.initial_password, request.app.state.settings),
+                "grade_level": row.grade_level,
+                "class_name": row.class_name,
+            }
+        )
+    return envelope(request, await repository.bulk_create_students(user, rows))
 
 
 @router.post("/admin/users/{user_id}/reset-password")
