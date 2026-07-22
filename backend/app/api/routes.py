@@ -287,6 +287,7 @@ async def logout(
     repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
     await repository.increment_token_version(user)
+    await repository.record_logout(user)
     return envelope(request, message="已退出登录")
 
 

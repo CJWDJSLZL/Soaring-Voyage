@@ -163,6 +163,18 @@ class PostgresIdentityProblemRepository:
             )
         user.token_version = int(version)
 
+    async def record_logout(self, user: User) -> None:
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            await connection.execute(
+                """
+                INSERT INTO audit_logs (tenant_id, operator_id, action, resource_type, resource_id, result)
+                VALUES ($1, $2, 'LOGOUT', 'auth', $3, 'success')
+                """,
+                user.tenant_id,
+                user.user_id,
+                user.user_id,
+            )
+
     async def create_catalog_problem(self, user: User, problem: dict[str, Any]) -> str:
         async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
             problem_id = await connection.fetchval(

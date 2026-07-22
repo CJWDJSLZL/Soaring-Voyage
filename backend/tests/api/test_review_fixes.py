@@ -203,6 +203,8 @@ def test_logout_revokes_existing_token() -> None:
     token = login(client, "student")
     assert client.post("/api/v1/auth/logout", headers=auth(token)).status_code == 200
     assert client.get("/api/v1/assignments/", headers=auth(token)).status_code == 401
+    assert app.state.store.audit_logs[-1]["action"] == "LOGOUT"
+    assert app.state.store.audit_logs[-1]["operator_id"] == "user-student"
 
 
 def test_submission_requires_exactly_one_answer_per_assignment_problem() -> None:

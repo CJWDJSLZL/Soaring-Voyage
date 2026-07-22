@@ -140,6 +140,22 @@ async def test_login_failure_and_token_updates_are_atomic() -> None:
 
 
 @pytest.mark.asyncio
+async def test_record_logout_writes_audit_log() -> None:
+    connection = AsyncMock()
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    user = PostgresIdentityProblemRepository.user_from_row(user_row())
+
+    await repository.record_logout(user)
+
+    business_calls = [call.args for call in connection.execute.await_args_list if "set_config" not in call.args[0]]
+    audit_sql, tenant_arg, operator_arg, resource_arg = business_calls[0]
+    assert "INSERT INTO audit_logs" in audit_sql
+    assert "'LOGOUT'" in audit_sql
+    assert "'auth'" in audit_sql
+    assert (tenant_arg, operator_arg, resource_arg) == (TENANT, USER_ID, USER_ID)
+
+
+@pytest.mark.asyncio
 async def test_replace_password_updates_varchar_and_token_version_together() -> None:
     connection = AsyncMock()
     connection.fetchval.return_value = 8

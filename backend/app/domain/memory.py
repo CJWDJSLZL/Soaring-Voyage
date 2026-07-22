@@ -48,6 +48,7 @@ class InMemoryRepository:
         self.events: dict[str, list[JsonDict]] = {}
         self.harness_runs: dict[str, JsonDict] = {}
         self.jobs: dict[str, JsonDict] = {}
+        self.audit_logs: list[JsonDict] = []
         self.disabled_user_ids: set[str] = set()
 
     def user_by_id(self, user_id: str) -> User | None:
@@ -111,6 +112,19 @@ class InMemoryRepository:
 
     async def increment_token_version(self, user: User) -> None:
         user.token_version += 1
+
+    async def record_logout(self, user: User) -> None:
+        self.audit_logs.append(
+            {
+                "tenant_id": user.tenant_id,
+                "operator_id": user.user_id,
+                "action": "LOGOUT",
+                "resource_type": "auth",
+                "resource_id": user.user_id,
+                "result": "success",
+                "created_at": utcnow().isoformat(),
+            }
+        )
 
     async def create_catalog_problem(self, user: User, problem: dict[str, Any]) -> str:
         problem_id = str(uuid4())
