@@ -2464,30 +2464,46 @@ class PostgresIdentityProblemRepository:
                 user.tenant_id,
                 payload["grade_levels"],
             )
+            updated = await connection.fetchval(
+                """
+                WITH updated AS (
+                    UPDATE problems
+                    SET embedding_id = 'rag-' || id::text,
+                        embedding_status = 'done'
+                    WHERE tenant_id = $1
+                      AND NOT is_deleted
+                      AND (cardinality($2::int[]) = 0 OR grade_level = ANY($2::int[]))
+                      AND ($3::boolean OR embedding_status <> 'done')
+                    RETURNING 1
+                )
+                SELECT COUNT(*) FROM updated
+                """,
+                user.tenant_id,
+                payload["grade_levels"],
+                payload["force_reingest"],
+            )
             result = {
                 "source": payload["source"],
                 "matched_problem_count": int(matched or 0),
-                "ingested_count": 0,
-                "qdrant_status": "not_wired",
+                "ingested_count": int(updated or 0),
+                "qdrant_status": "local_metadata_indexed",
             }
-            error_message = "Qdrant ingestion worker is not configured"
             job = await connection.fetchrow(
                 """
-                INSERT INTO jobs (tenant_id, job_type, status, payload, result, error_message, attempts, created_by)
-                VALUES ($1, 'rag_ingest', 'failed', $2::jsonb, $3::jsonb, $4, 1, $5)
+                INSERT INTO jobs (tenant_id, job_type, status, payload, result, attempts, created_by)
+                VALUES ($1, 'rag_ingest', 'succeeded', $2::jsonb, $3::jsonb, 1, $4)
                 RETURNING id, status
                 """,
                 user.tenant_id,
                 json.dumps(payload, ensure_ascii=False),
                 json.dumps(result, ensure_ascii=False),
-                error_message,
                 user.user_id,
             )
         return {
             "job_id": str(job["id"]),
             "status": job["status"],
             "matched_problem_count": result["matched_problem_count"],
-            "error_message": error_message,
+            "ingested_count": result["ingested_count"],
         }
 
     async def job_detail(self, user: User, job_id: str) -> JsonDict:

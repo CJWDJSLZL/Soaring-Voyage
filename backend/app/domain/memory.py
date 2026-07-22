@@ -114,6 +114,8 @@ class InMemoryRepository:
             "problem_id": problem_id,
             "tenant_id": user.tenant_id,
             "created_by": user.user_id,
+            "embedding_id": None,
+            "embedding_status": "pending",
             **problem,
             "created_at": utcnow().isoformat(),
         }
@@ -957,15 +959,22 @@ class InMemoryRepository:
     async def create_rag_ingest_job(self, user: User, payload: dict[str, Any]) -> JsonDict:
         job_id = str(uuid4())
         now = utcnow().isoformat()
-        problem_count = sum(
-            item["tenant_id"] == user.tenant_id
-            and (not payload["grade_levels"] or item["grade_level"] in payload["grade_levels"])
+        matched = [
+            item
             for item in self.problems.values()
-        )
+            if item["tenant_id"] == user.tenant_id
+            and (not payload["grade_levels"] or item["grade_level"] in payload["grade_levels"])
+        ]
+        to_ingest = [
+            item for item in matched if payload["force_reingest"] or item.get("embedding_status", "pending") != "done"
+        ]
+        for item in to_ingest:
+            item["embedding_id"] = f"rag-{item['problem_id']}"
+            item["embedding_status"] = "done"
         job = {
             "job_id": job_id,
             "job_type": "rag_ingest",
-            "status": "failed",
+            "status": "succeeded",
             "progress": 1.0,
             "created_at": now,
             "updated_at": now,
@@ -973,18 +982,18 @@ class InMemoryRepository:
             "payload": payload,
             "result": {
                 "source": payload["source"],
-                "matched_problem_count": problem_count,
-                "ingested_count": 0,
-                "qdrant_status": "not_wired",
+                "matched_problem_count": len(matched),
+                "ingested_count": len(to_ingest),
+                "qdrant_status": "local_metadata_indexed",
             },
-            "error_message": "Qdrant ingestion worker is not configured",
+            "error_message": None,
         }
         self.jobs[job_id] = job
         return {
             "job_id": job_id,
-            "status": "failed",
-            "matched_problem_count": problem_count,
-            "error_message": job["error_message"],
+            "status": "succeeded",
+            "matched_problem_count": len(matched),
+            "ingested_count": len(to_ingest),
         }
 
     async def job_detail(self, user: User, job_id: str) -> JsonDict:

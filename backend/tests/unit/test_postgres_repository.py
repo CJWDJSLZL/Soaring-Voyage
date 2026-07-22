@@ -641,11 +641,11 @@ async def test_update_user_status_rejects_self_suspend() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rag_ingest_job_records_failed_when_qdrant_worker_is_not_configured() -> None:
+async def test_rag_ingest_job_marks_matching_problems_indexed() -> None:
     connection = AsyncMock()
     job_id = UUID("99999999-9999-4999-8999-999999999999")
-    connection.fetchval.return_value = 12
-    connection.fetchrow.return_value = {"id": job_id, "status": "failed"}
+    connection.fetchval.side_effect = [12, 7]
+    connection.fetchrow.return_value = {"id": job_id, "status": "succeeded"}
     repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
     sysadmin = PostgresIdentityProblemRepository.user_from_row(user_row(role="sysadmin"))
 
@@ -655,9 +655,12 @@ async def test_rag_ingest_job_records_failed_when_qdrant_worker_is_not_configure
     )
 
     assert result["job_id"] == str(job_id)
-    assert result["status"] == "failed"
+    assert result["status"] == "succeeded"
     assert result["matched_problem_count"] == 12
-    assert "Qdrant ingestion worker" in result["error_message"]
+    assert result["ingested_count"] == 7
+    update_sql = connection.fetchval.await_args_list[1].args[0]
+    assert "embedding_status = 'done'" in update_sql
+    assert "$3::boolean OR embedding_status <> 'done'" in update_sql
     sql = connection.fetchrow.await_args.args[0]
-    assert "'rag_ingest', 'failed'" in sql
-    assert "error_message" in sql
+    assert "'rag_ingest', 'succeeded'" in sql
+    assert "error_message" not in sql

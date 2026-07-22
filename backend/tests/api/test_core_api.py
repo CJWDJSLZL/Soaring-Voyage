@@ -403,6 +403,7 @@ def test_admin_classes_stats_password_reset_and_ops_jobs(client: TestClient):
     admin = login(client, "admin")
     sysadmin = login(client, "sysadmin")
     student = login(client, "student")
+    teacher = login(client, "teacher")
 
     denied = client.get("/api/v1/admin/stats/overview", headers=auth(student))
     assert denied.status_code == 403
@@ -487,20 +488,25 @@ def test_admin_classes_stats_password_reset_and_ops_jobs(client: TestClient):
     assert real_detail.json()["data"]["status"] == "completed"
     assert real_detail.json()["data"]["total_cases"] == 30
 
+    rag_problem_id, _assignment_id = make_problem_and_assignment(client, teacher)
+    assert app.state.store.problems[rag_problem_id]["embedding_status"] == "pending"
+
     rag = client.post(
         "/api/v1/ops/rag/ingest",
         headers=auth(sysadmin),
         json={"source": "problems_table", "grade_levels": [3], "batch_size": 100, "force_reingest": False},
     )
     assert rag.status_code == 202
-    assert rag.json()["data"]["status"] == "failed"
-    assert "Qdrant ingestion worker" in rag.json()["data"]["error_message"]
+    assert rag.json()["data"]["status"] == "succeeded"
+    assert rag.json()["data"]["matched_problem_count"] == 1
+    assert rag.json()["data"]["ingested_count"] == 1
+    assert app.state.store.problems[rag_problem_id]["embedding_status"] == "done"
     job_id = rag.json()["data"]["job_id"]
     job = client.get(f"/api/v1/ops/jobs/{job_id}", headers=auth(sysadmin))
     assert job.status_code == 200
-    assert job.json()["data"]["status"] == "failed"
-    assert job.json()["data"]["result"]["qdrant_status"] == "not_wired"
-    assert "Qdrant ingestion worker" in job.json()["data"]["error_message"]
+    assert job.json()["data"]["status"] == "succeeded"
+    assert job.json()["data"]["result"]["qdrant_status"] == "local_metadata_indexed"
+    assert job.json()["data"]["error_message"] is None
 
 
 def test_admin_bulk_create_students_from_csv(client: TestClient):
