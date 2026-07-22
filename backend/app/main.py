@@ -68,7 +68,6 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
         request.state.trace_id = supplied if supplied.startswith("req-") else f"req-{uuid4()}"
         path = request.url.path
         unported_prefixes = (
-            f"{configured.api_prefix}/assignments",
             f"{configured.api_prefix}/submissions",
             f"{configured.api_prefix}/teacher/human-review",
         )
@@ -125,7 +124,7 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
                 database_status = "unavailable"
                 status_code = 503
         repository_status = (
-            "hybrid-postgres-identity-problems"
+            "hybrid-postgres-identity-problems-assignments"
             if configured.persistence_backend == "postgres"
             else "development-in-memory-adapter"
         )

@@ -68,11 +68,10 @@ def test_postgres_pool_repository_health_and_shutdown_lifecycle() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "degraded"
-    assert body["services"]["repository"] == "hybrid-postgres-identity-problems"
+    assert body["services"]["repository"] == "hybrid-postgres-identity-problems-assignments"
     assert body["services"]["database"] == "ok"
     assert body["services"]["sse_tickets"] == "development-in-memory-adapter"
-    assert unported.status_code == 503
-    assert unported.json()["code"] == 5003
+    assert unported.status_code == 401
 
 
 def test_postgres_health_reports_failed_ping() -> None:

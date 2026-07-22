@@ -33,8 +33,12 @@ async def test_runtime_role_rls_identity_token_version_and_problem_persistence()
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=2)
     repository = PostgresIdentityProblemRepository(pool, TENANT_ID)
     user_id = str(uuid4())
+    student_id = str(uuid4())
+    class_id = str(uuid4())
     username = f"integration-{uuid4().hex}"
+    student_username = f"integration-student-{uuid4().hex}"
     problem_ids: list[str] = []
+    assignment_ids: list[str] = []
     try:
         async with pool.acquire() as connection:
             role = await connection.fetchrow(
@@ -55,6 +59,34 @@ async def test_runtime_role_rls_identity_token_version_and_problem_persistence()
                     TENANT_ID,
                     username,
                     hash_password("Integration@123").decode("utf-8"),
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO users (id, tenant_id, role, username, display_name, password_hash, grade_level)
+                    VALUES ($1, $2, 'student', $3, 'Integration Student', $4, 3)
+                    """,
+                    student_id,
+                    TENANT_ID,
+                    student_username,
+                    hash_password("Integration@123").decode("utf-8"),
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO classes (id, tenant_id, grade_level, name, teacher_id, academic_year)
+                    VALUES ($1, $2, 3, 'Integration Class', $3, '2026-2027')
+                    """,
+                    class_id,
+                    TENANT_ID,
+                    user_id,
+                )
+                await connection.execute(
+                    """
+                    INSERT INTO class_students (tenant_id, class_id, student_id)
+                    VALUES ($1, $2, $3)
+                    """,
+                    TENANT_ID,
+                    class_id,
+                    student_id,
                 )
 
         user = await repository.identity_by_username(username)
@@ -133,7 +165,42 @@ async def test_runtime_role_rls_identity_token_version_and_problem_persistence()
             )
             assert catalog.status_code == 200
             assert api_problem_id in {item["problem_id"] for item in catalog.json()["data"]["items"]}
-            assert client.get("/api/v1/assignments/", headers=authorization).status_code == 503
+            assignment = client.post(
+                "/api/v1/assignments/",
+                headers=authorization,
+                json={
+                    "title": "Integration Assignment",
+                    "class_ids": [class_id],
+                    "due_date": None,
+                    "problem_ids": [api_problem_id],
+                },
+            )
+            assert assignment.status_code == 201
+            assignment_id = assignment.json()["data"]["assignment_id"]
+            assignment_ids.append(assignment_id)
+            assignments = client.get("/api/v1/assignments/", headers=authorization)
+            assert assignments.status_code == 200
+            assert assignment_id in {item["assignment_id"] for item in assignments.json()["data"]["items"]}
+            detail = client.get(f"/api/v1/assignments/{assignment_id}", headers=authorization)
+            assert detail.status_code == 200
+            assert detail.json()["data"]["problems"][0]["problem_id"] == api_problem_id
+
+            student_login = client.post(
+                "/api/v1/auth/login",
+                json={"username": student_username, "password": "Integration@123"},
+            )
+            assert student_login.status_code == 200
+            student_auth = {"Authorization": f"Bearer {student_login.json()['data']['access_token']}"}
+            student_detail = client.get(f"/api/v1/assignments/{assignment_id}", headers=student_auth)
+            assert student_detail.status_code == 200
+            assert student_detail.json()["data"]["my_submission"] is None
+            submission = client.post(
+                "/api/v1/submissions/",
+                headers=student_auth,
+                json={"assignment_id": assignment_id, "answers": [{"problem_id": api_problem_id, "answer_text": "4"}]},
+            )
+            assert submission.status_code == 503
+            assert submission.json()["code"] == 5003
 
         other_tenant = str(uuid4())
         with tenant_context(other_tenant, "worker"):
@@ -143,11 +210,22 @@ async def test_runtime_role_rls_identity_token_version_and_problem_persistence()
     finally:
         with tenant_context(TENANT_ID, "worker"):
             async with tenant_conn(pool, user_id=NIL_SYSTEM_USER_ID) as connection:
+                for persisted_assignment_id in assignment_ids:
+                    await connection.execute(
+                        "DELETE FROM assignments WHERE tenant_id = $1 AND id = $2",
+                        TENANT_ID,
+                        persisted_assignment_id,
+                    )
                 for persisted_problem_id in problem_ids:
                     await connection.execute(
                         "DELETE FROM problems WHERE tenant_id = $1 AND id = $2",
                         TENANT_ID,
                         persisted_problem_id,
                     )
+                await connection.execute(
+                    "DELETE FROM class_students WHERE tenant_id = $1 AND class_id = $2", TENANT_ID, class_id
+                )
+                await connection.execute("DELETE FROM classes WHERE tenant_id = $1 AND id = $2", TENANT_ID, class_id)
+                await connection.execute("DELETE FROM users WHERE tenant_id = $1 AND id = $2", TENANT_ID, student_id)
                 await connection.execute("DELETE FROM users WHERE tenant_id = $1 AND id = $2", TENANT_ID, user_id)
         await pool.close()

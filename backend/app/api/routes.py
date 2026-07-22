@@ -289,49 +289,19 @@ async def list_problems(
 
 
 @router.post("/assignments/", status_code=201)
-def create_assignment(
+async def create_assignment(
     payload: AssignmentCreate,
     request: Request,
     user: User = Depends(require_roles("teacher", "admin", "sysadmin")),
-    store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
-    if len(payload.problem_ids) != len(set(payload.problem_ids)):
-        raise AppError(422, 4022, "请求参数校验失败", "problem_ids must be unique")
-    validate_class_ids(store, user, payload.class_ids)
-    missing = [
-        item
-        for item in payload.problem_ids
-        if item not in store.problems or store.problems[item]["tenant_id"] != user.tenant_id
-    ]
-    if missing:
-        raise AppError(404, 4004, "题目不存在", f"Missing problem ids: {missing}")
     validate_future_due_date(payload.due_date)
-    assignment_id = ident()
-    created_at = iso_now()
-    store.assignments[assignment_id] = {
-        "assignment_id": assignment_id,
-        "tenant_id": user.tenant_id,
-        "created_by": user.user_id,
-        **payload.model_dump(mode="json"),
-        "created_at": created_at,
-        "status": "active",
-    }
-    data = {
-        "assignment_id": assignment_id,
-        "title": payload.title,
-        "classes": [
-            {"class_id": item, "class_name": store.class_name(user.tenant_id, item)} for item in payload.class_ids
-        ],
-        "due_date": payload.due_date.isoformat() if payload.due_date else None,
-        "problem_count": len(payload.problem_ids),
-        "created_at": created_at,
-        "status": "active",
-    }
+    data = await repository.create_assignment(user, payload.model_dump())
     return envelope(request, data)
 
 
 @router.get("/assignments/")
-def list_assignments(
+async def list_assignments(
     request: Request,
     class_id: str | None = None,
     status: Literal["active", "expired", "all"] = "all",
@@ -340,75 +310,30 @@ def list_assignments(
     page_number: int = Query(1, alias="page", ge=1),
     page_size: int = Query(20, ge=1, le=100),
     user: User = Depends(current_user),
-    store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
     effective_order_by = order_by or ("due_date" if user.role == "student" else "created_at")
     effective_order = order or ("asc" if user.role == "student" and order_by is None else "desc")
-    items = []
-    for assignment in store.assignments.values():
-        if not can_access_assignment(user, assignment) or (class_id and class_id not in assignment["class_ids"]):
-            continue
-        due = assignment["due_date"]
-        current_status = assignment_status(assignment)
-        if status != "all" and current_status != status:
-            continue
-        mine = store.submission_for(user.user_id, assignment["assignment_id"]) if user.role == "student" else None
-        due_at = as_utc(due) if due else None
-        item = {
-            "assignment_id": assignment["assignment_id"],
-            "title": assignment["title"],
-            "class_name": assignment_class_name(store, assignment),
-            "due_date": due,
-            "problem_count": len(assignment["problem_ids"]),
-            "status": current_status,
-            "is_expiring_soon": bool(due_at and utcnow() < due_at <= utcnow() + timedelta(hours=1)),
-            "created_at": assignment["created_at"],
-        }
-        if user.role == "student":
-            item["submission_status"] = mine["status"] if mine else "not_submitted"
-        items.append(item)
-    items.sort(
-        key=lambda item: (
-            as_utc(item[effective_order_by]) if item[effective_order_by] else datetime.max.replace(tzinfo=UTC)
-        ),
-        reverse=effective_order == "desc",
+    data = await repository.list_assignments(
+        user,
+        class_id=class_id,
+        status=status,
+        order_by=effective_order_by,
+        order=effective_order,
+        page_number=page_number,
+        page_size=page_size,
     )
-    if effective_order_by == "due_date":
-        items = [item for item in items if item["due_date"] is not None] + [
-            item for item in items if item["due_date"] is None
-        ]
-    return envelope(request, page(items, page_number, page_size))
+    return envelope(request, data)
 
 
 @router.get("/assignments/{assignment_id}")
-def assignment_detail(
+async def assignment_detail(
     assignment_id: str,
     request: Request,
     user: User = Depends(current_user),
-    store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
-    assignment = get_assignment(store, assignment_id)
-    if not can_access_assignment(user, assignment):
-        raise AppError(404, 4004, "作业不存在")
-    fields = ["problem_id", "problem_text", "problem_type", "grade_level", "difficulty", "tags"]
-    if user.role == "student":
-        fields = ["problem_id", "problem_text", "problem_type", "difficulty"]
-    problems = []
-    for sequence, problem_id in enumerate(assignment["problem_ids"], 1):
-        problem = store.problems[problem_id]
-        problems.append({"sequence": sequence, **{key: problem[key] for key in fields}})
-    data = {
-        "assignment_id": assignment_id,
-        "title": assignment["title"],
-        "class_name": assignment_class_name(store, assignment),
-        "due_date": assignment["due_date"],
-        "status": assignment_status(assignment),
-        "problems": problems,
-    }
-    if user.role == "student":
-        mine = store.submission_for(user.user_id, assignment_id)
-        data["my_submission"] = {"submission_id": mine["submission_id"], "status": mine["status"]} if mine else None
-    return envelope(request, data)
+    return envelope(request, await repository.assignment_detail(user, assignment_id))
 
 
 @router.patch("/assignments/{assignment_id}")
@@ -419,6 +344,8 @@ def patch_assignment(
     user: User = Depends(require_roles("teacher", "admin", "sysadmin")),
     store: Repository = Depends(get_store),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        raise AppError(503, 5003, "该工作流尚未迁移到 PostgreSQL", "作业修改将在后续提交/复核纵切中迁移")
     assignment = get_assignment(store, assignment_id)
     if not can_access_assignment(user, assignment):
         raise AppError(404, 4004, "作业不存在")
