@@ -798,6 +798,33 @@ async def test_delete_class_returns_not_found_for_missing_or_deleted_class() -> 
 
 
 @pytest.mark.asyncio
+async def test_admin_stats_overview_reports_real_latency_metrics() -> None:
+    connection = AsyncMock()
+    connection.fetchrow.side_effect = [
+        {"name": "Soaring School", "active_school_year": "2026-2027"},
+        {"students": 30, "teachers": 3, "active_students": 12, "active_teachers": 2},
+        {"total": 40, "today": 5, "week": 18, "month": 32},
+        {"total": 80, "ai_graded": 70, "human_review": 8, "rule_fallback": 2, "correct": 64},
+        {"avg_grading_latency_ms": 123.45, "p95_grading_latency_ms": 456.78},
+    ]
+    connection.fetchval.return_value = 4
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    admin = PostgresIdentityProblemRepository.user_from_row(user_row(role="admin"))
+
+    overview = await repository.admin_stats_overview(admin)
+
+    assert overview["tenant_name"] == "Soaring School"
+    assert overview["users"]["total_classes"] == 4
+    assert overview["submissions"]["this_week"] == 18
+    assert overview["grading"]["human_review_rate"] == 0.1
+    assert overview["grading"]["average_accuracy"] == 0.8
+    assert overview["performance"] == {"avg_grading_latency_ms": 123.5, "p95_grading_latency_ms": 456.8}
+    latency_sql = connection.fetchrow.await_args_list[4].args[0]
+    assert "percentile_cont(0.95)" in latency_sql
+    assert "latency_ms IS NOT NULL" in latency_sql
+
+
+@pytest.mark.asyncio
 async def test_rag_ingest_job_marks_matching_problems_indexed() -> None:
     connection = AsyncMock()
     job_id = UUID("99999999-9999-4999-8999-999999999999")

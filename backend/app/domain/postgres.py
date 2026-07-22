@@ -2533,6 +2533,16 @@ class PostgresIdentityProblemRepository:
                 """,
                 user.tenant_id,
             )
+            performance = await connection.fetchrow(
+                """
+                SELECT
+                  AVG(latency_ms) AS avg_grading_latency_ms,
+                  percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms) AS p95_grading_latency_ms
+                FROM grading_results
+                WHERE tenant_id = $1 AND latency_ms IS NOT NULL
+                """,
+                user.tenant_id,
+            )
         total_results = int(grading["total"] or 0)
         human_review_count = int(grading["human_review"] or 0)
         rule_fallback_count = int(grading["rule_fallback"] or 0)
@@ -2560,7 +2570,14 @@ class PostgresIdentityProblemRepository:
                 "average_accuracy": round(correct / total_results, 3) if total_results else 0.0,
                 "rule_fallback_rate": round(rule_fallback_count / total_results, 3) if total_results else 0.0,
             },
-            "performance": {"avg_grading_latency_ms": 0, "p95_grading_latency_ms": 0},
+            "performance": {
+                "avg_grading_latency_ms": round(float(performance["avg_grading_latency_ms"] or 0), 1)
+                if performance
+                else 0,
+                "p95_grading_latency_ms": round(float(performance["p95_grading_latency_ms"] or 0), 1)
+                if performance
+                else 0,
+            },
         }
 
     async def reset_user_password(self, user: User, target_user_id: str, password_hash: bytes) -> JsonDict:
