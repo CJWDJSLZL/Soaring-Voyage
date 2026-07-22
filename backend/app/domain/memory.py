@@ -54,11 +54,15 @@ class InMemoryRepository:
         return next((user for user in self.users.values() if user.user_id == user_id), None)
 
     def known_class_ids(self, tenant_id: str) -> set[str]:
-        return {class_id for class_id, item in self.classes.items() if item["tenant_id"] == tenant_id}
+        return {
+            class_id
+            for class_id, item in self.classes.items()
+            if item["tenant_id"] == tenant_id and not item.get("is_deleted")
+        }
 
     def class_name(self, tenant_id: str, class_id: str) -> str:
         item = self.classes.get(class_id)
-        if item is None or item["tenant_id"] != tenant_id:
+        if item is None or item["tenant_id"] != tenant_id or item.get("is_deleted"):
             raise KeyError(class_id)
         return str(item["class_name"])
 
@@ -484,11 +488,26 @@ class InMemoryRepository:
             "created_at": created_at,
         }
 
+    async def delete_class(self, user: User, class_id: str) -> JsonDict:
+        from app.core.errors import AppError
+
+        classroom = self.classes.get(class_id)
+        if classroom is None or classroom["tenant_id"] != user.tenant_id or classroom.get("is_deleted"):
+            raise AppError(404, 4004, "class does not exist")
+        classroom["is_deleted"] = True
+        classroom["deleted_at"] = utcnow().isoformat()
+        classroom["deleted_by"] = user.user_id
+        for member in self.users.values():
+            if member.tenant_id == user.tenant_id and class_id in member.class_ids:
+                member.class_ids = [item for item in member.class_ids if item != class_id]
+                member.token_version += 1
+        return {"class_id": class_id, "deleted": True}
+
     async def bulk_create_students(self, user: User, rows: list[dict[str, Any]]) -> JsonDict:
         class_by_name = {
             str(item.get("class_name") or item.get("name")): (class_id, item)
             for class_id, item in self.classes.items()
-            if item["tenant_id"] == user.tenant_id
+            if item["tenant_id"] == user.tenant_id and not item.get("is_deleted")
         }
         created = 0
         skipped = 0
@@ -541,7 +560,9 @@ class InMemoryRepository:
         }
 
     async def admin_stats_overview(self, user: User) -> JsonDict:
-        tenant_classes = [item for item in self.classes.values() if item["tenant_id"] == user.tenant_id]
+        tenant_classes = [
+            item for item in self.classes.values() if item["tenant_id"] == user.tenant_id and not item.get("is_deleted")
+        ]
         tenant_submissions = [item for item in self.submissions.values() if item["tenant_id"] == user.tenant_id]
         latest_results = [result for submission in tenant_submissions for result in submission["results"]]
         human_review_count = sum(result.get("grading_source") == "human_override" for result in latest_results)

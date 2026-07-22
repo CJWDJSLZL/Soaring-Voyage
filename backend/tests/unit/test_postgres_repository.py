@@ -650,6 +650,53 @@ async def test_update_user_status_rejects_self_suspend() -> None:
 
 
 @pytest.mark.asyncio
+async def test_delete_class_soft_deletes_links_and_audits() -> None:
+    connection = AsyncMock()
+    connection.fetchrow.return_value = {
+        "id": UUID(CLASS_ID),
+        "name": "Class A",
+        "grade_level": 3,
+        "teacher_id": UUID(USER_ID),
+        "academic_year": "2026-2027",
+    }
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    admin = PostgresIdentityProblemRepository.user_from_row(user_row(role="admin"))
+
+    result = await repository.delete_class(admin, CLASS_ID)
+
+    assert result == {"class_id": CLASS_ID, "deleted": True}
+    update_sql, tenant_arg, class_arg = connection.fetchrow.await_args.args
+    assert "UPDATE classes" in update_sql
+    assert "is_deleted = true" in update_sql
+    assert (tenant_arg, class_arg) == (TENANT, CLASS_ID)
+    business_calls = [call.args for call in connection.execute.await_args_list if "set_config" not in call.args[0]]
+    link_sql, _tenant, _class_id = business_calls[0]
+    assert "UPDATE class_students" in link_sql
+    assert "is_active = false" in link_sql
+    audit_sql, _tenant, _operator, resource_id, detail = business_calls[1]
+    assert "audit_logs" in audit_sql
+    assert "'CLASS_DELETED'" in audit_sql
+    assert resource_id == CLASS_ID
+    assert '"name": "Class A"' in detail
+
+
+@pytest.mark.asyncio
+async def test_delete_class_returns_not_found_for_missing_or_deleted_class() -> None:
+    connection = AsyncMock()
+    connection.fetchrow.return_value = None
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    admin = PostgresIdentityProblemRepository.user_from_row(user_row(role="admin"))
+
+    with pytest.raises(AppError) as exc:
+        await repository.delete_class(admin, CLASS_ID)
+
+    assert exc.value.status_code == 404
+    business_sql = "\n".join(call.args[0] for call in connection.execute.await_args_list)
+    assert "UPDATE class_students" not in business_sql
+    assert "CLASS_DELETED" not in business_sql
+
+
+@pytest.mark.asyncio
 async def test_rag_ingest_job_marks_matching_problems_indexed() -> None:
     connection = AsyncMock()
     job_id = UUID("99999999-9999-4999-8999-999999999999")

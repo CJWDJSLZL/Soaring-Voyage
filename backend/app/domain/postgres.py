@@ -2134,6 +2134,50 @@ class PostgresIdentityProblemRepository:
             "created_at": row["created_at"].isoformat(),
         }
 
+    async def delete_class(self, user: User, class_id: str) -> JsonDict:
+        normalized_class_id = self._uuid_text(class_id, "class_id")
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE classes
+                SET is_deleted = true
+                WHERE tenant_id = $1 AND id = $2 AND NOT is_deleted
+                RETURNING id, name, grade_level, teacher_id, academic_year
+                """,
+                user.tenant_id,
+                normalized_class_id,
+            )
+            if row is None:
+                raise AppError(404, 4004, "class does not exist")
+            await connection.execute(
+                """
+                UPDATE class_students
+                SET is_active = false
+                WHERE tenant_id = $1 AND class_id = $2
+                """,
+                user.tenant_id,
+                normalized_class_id,
+            )
+            await connection.execute(
+                """
+                INSERT INTO audit_logs (tenant_id, operator_id, action, resource_type, resource_id, detail, result)
+                VALUES ($1, $2, 'CLASS_DELETED', 'class', $3, $4::jsonb, 'success')
+                """,
+                user.tenant_id,
+                user.user_id,
+                normalized_class_id,
+                json.dumps(
+                    {
+                        "name": row["name"],
+                        "grade_level": row["grade_level"],
+                        "teacher_id": str(row["teacher_id"]),
+                        "academic_year": row["academic_year"],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        return {"class_id": normalized_class_id, "deleted": True}
+
     async def bulk_create_students(self, user: User, rows: list[dict[str, Any]]) -> JsonDict:
         async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
             class_rows = await connection.fetch(

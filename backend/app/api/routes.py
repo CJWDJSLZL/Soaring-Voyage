@@ -1039,6 +1039,16 @@ async def create_class(
     return envelope(request, await repository.create_class(user, payload.model_dump()))
 
 
+@router.delete("/admin/classes/{class_id}")
+async def delete_class(
+    class_id: str,
+    request: Request,
+    user: User = Depends(require_roles("admin", "sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    return envelope(request, await repository.delete_class(user, class_id))
+
+
 @router.post("/admin/students/bulk-create")
 async def bulk_create_students(
     request: Request,

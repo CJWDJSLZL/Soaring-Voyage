@@ -213,6 +213,85 @@ def test_assignment_patch_cannot_remove_every_problem() -> None:
     assert overlap.status_code == 422
 
 
+def test_admin_soft_deletes_class_and_removes_it_from_admin_workflows() -> None:
+    app.state.store.reset()
+    client = TestClient(app)
+    admin = login(client, "admin")
+    teacher = login(client, "teacher")
+    initial_classes = client.get("/api/v1/admin/stats/overview", headers=auth(admin)).json()["data"]["users"][
+        "total_classes"
+    ]
+
+    created = client.post(
+        "/api/v1/admin/classes/",
+        headers=auth(admin),
+        json={
+            "name": "待删除班级",
+            "grade_level": 3,
+            "teacher_id": "user-teacher",
+            "academic_year": "2026-2027",
+        },
+    )
+    assert created.status_code == 201, created.text
+    class_id = created.json()["data"]["class_id"]
+    assert class_id in app.state.store.users["teacher"].class_ids
+
+    denied = client.delete(f"/api/v1/admin/classes/{class_id}", headers=auth(teacher))
+    assert denied.status_code == 403
+    deleted = client.delete(f"/api/v1/admin/classes/{class_id}", headers=auth(admin))
+
+    assert deleted.status_code == 200, deleted.text
+    assert deleted.json()["data"] == {"class_id": class_id, "deleted": True}
+    assert app.state.store.classes[class_id]["is_deleted"] is True
+    assert class_id not in app.state.store.users["teacher"].class_ids
+    assert client.delete(f"/api/v1/admin/classes/{class_id}", headers=auth(admin)).status_code == 404
+
+    problem = client.post(
+        "/api/v1/problems/",
+        headers=auth(admin),
+        json={
+            "problem_text": "1 + 2 = ___",
+            "problem_type": "arithmetic",
+            "reference_answer": "3",
+            "grade_level": 3,
+            "difficulty": "easy",
+            "curriculum_version": "人教版",
+        },
+    )
+    assert problem.status_code == 201, problem.text
+    assignment = client.post(
+        "/api/v1/assignments/",
+        headers=auth(admin),
+        json={
+            "title": "不能布置到已删除班级",
+            "class_ids": [class_id],
+            "due_date": (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            "problem_ids": [problem.json()["data"]["problem_id"]],
+        },
+    )
+    assert assignment.status_code == 404
+
+    imported = client.post(
+        "/api/v1/admin/students/bulk-create",
+        headers=auth(admin),
+        files={
+            "file": (
+                "students.csv",
+                "姓名,用户名,初始密码,年级,班级名称\n测试学生,deleted_class_student,Import123,3,待删除班级\n".encode(),
+                "text/csv",
+            )
+        },
+    )
+    assert imported.status_code == 200, imported.text
+    assert imported.json()["data"]["created"] == 0
+    assert imported.json()["data"]["failed"] == 1
+    assert imported.json()["data"]["failed_rows"][0]["reason"] == "class does not exist"
+    final_classes = client.get("/api/v1/admin/stats/overview", headers=auth(admin)).json()["data"]["users"][
+        "total_classes"
+    ]
+    assert final_classes == initial_classes
+
+
 def test_followed_sse_stream_observes_events_added_after_connection() -> None:
     events: list[dict] = []
     stream = sse_event_stream(events, heartbeat_count=None, follow=True, poll_seconds=0)
