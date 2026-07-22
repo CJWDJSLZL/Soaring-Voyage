@@ -638,3 +638,26 @@ async def test_update_user_status_rejects_self_suspend() -> None:
 
     assert exc.value.status_code == 409
     connection.fetchrow.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rag_ingest_job_records_failed_when_qdrant_worker_is_not_configured() -> None:
+    connection = AsyncMock()
+    job_id = UUID("99999999-9999-4999-8999-999999999999")
+    connection.fetchval.return_value = 12
+    connection.fetchrow.return_value = {"id": job_id, "status": "failed"}
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    sysadmin = PostgresIdentityProblemRepository.user_from_row(user_row(role="sysadmin"))
+
+    result = await repository.create_rag_ingest_job(
+        sysadmin,
+        {"source": "problems_table", "grade_levels": [3], "batch_size": 100, "force_reingest": False},
+    )
+
+    assert result["job_id"] == str(job_id)
+    assert result["status"] == "failed"
+    assert result["matched_problem_count"] == 12
+    assert "Qdrant ingestion worker" in result["error_message"]
+    sql = connection.fetchrow.await_args.args[0]
+    assert "'rag_ingest', 'failed'" in sql
+    assert "error_message" in sql

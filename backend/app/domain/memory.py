@@ -965,7 +965,7 @@ class InMemoryRepository:
         job = {
             "job_id": job_id,
             "job_type": "rag_ingest",
-            "status": "succeeded",
+            "status": "failed",
             "progress": 1.0,
             "created_at": now,
             "updated_at": now,
@@ -977,9 +977,15 @@ class InMemoryRepository:
                 "ingested_count": 0,
                 "qdrant_status": "not_wired",
             },
+            "error_message": "Qdrant ingestion worker is not configured",
         }
         self.jobs[job_id] = job
-        return {"job_id": job_id, "status": "succeeded", "matched_problem_count": problem_count}
+        return {
+            "job_id": job_id,
+            "status": "failed",
+            "matched_problem_count": problem_count,
+            "error_message": job["error_message"],
+        }
 
     async def job_detail(self, user: User, job_id: str) -> JsonDict:
         from app.core.errors import AppError

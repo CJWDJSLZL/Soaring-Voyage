@@ -2470,21 +2470,24 @@ class PostgresIdentityProblemRepository:
                 "ingested_count": 0,
                 "qdrant_status": "not_wired",
             }
+            error_message = "Qdrant ingestion worker is not configured"
             job = await connection.fetchrow(
                 """
-                INSERT INTO jobs (tenant_id, job_type, status, payload, result, attempts, created_by)
-                VALUES ($1, 'rag_ingest', 'succeeded', $2::jsonb, $3::jsonb, 1, $4)
+                INSERT INTO jobs (tenant_id, job_type, status, payload, result, error_message, attempts, created_by)
+                VALUES ($1, 'rag_ingest', 'failed', $2::jsonb, $3::jsonb, $4, 1, $5)
                 RETURNING id, status
                 """,
                 user.tenant_id,
                 json.dumps(payload, ensure_ascii=False),
                 json.dumps(result, ensure_ascii=False),
+                error_message,
                 user.user_id,
             )
         return {
             "job_id": str(job["id"]),
             "status": job["status"],
             "matched_problem_count": result["matched_problem_count"],
+            "error_message": error_message,
         }
 
     async def job_detail(self, user: User, job_id: str) -> JsonDict:

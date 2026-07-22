@@ -452,10 +452,14 @@ def test_admin_classes_stats_password_reset_and_ops_jobs(client: TestClient):
         json={"source": "problems_table", "grade_levels": [3], "batch_size": 100, "force_reingest": False},
     )
     assert rag.status_code == 202
+    assert rag.json()["data"]["status"] == "failed"
+    assert "Qdrant ingestion worker" in rag.json()["data"]["error_message"]
     job_id = rag.json()["data"]["job_id"]
     job = client.get(f"/api/v1/ops/jobs/{job_id}", headers=auth(sysadmin))
     assert job.status_code == 200
+    assert job.json()["data"]["status"] == "failed"
     assert job.json()["data"]["result"]["qdrant_status"] == "not_wired"
+    assert "Qdrant ingestion worker" in job.json()["data"]["error_message"]
 
 
 def test_admin_bulk_create_students_from_csv(client: TestClient):
