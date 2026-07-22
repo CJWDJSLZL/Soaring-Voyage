@@ -117,6 +117,46 @@ def test_redis_ticket_repository_health_and_shutdown_lifecycle() -> None:
     assert fake_redis.closed is True
 
 
+def test_production_lifecycle_uses_external_adapters_without_memory_store() -> None:
+    connection = AsyncMock()
+    connection.fetchval.return_value = 1
+    pool = MagicMock()
+    pool.acquire.return_value = AsyncContext(connection)
+    pool.close = AsyncMock()
+    fake_redis = FakeRedis()
+    configured = Settings(
+        app_env="production",
+        persistence_backend="postgres",
+        database_url="postgresql:///app",
+        default_tenant_id=TENANT,
+        redis_url="redis://localhost:6379/0",
+        jwt_secret="x" * 40,
+        allowed_origins=("https://school.example",),
+        allowed_hosts=("api.school.example",),
+        allowed_origins_configured=True,
+        allowed_hosts_configured=True,
+    )
+    test_app = create_app(
+        configured,
+        pool_factory=AsyncMock(return_value=pool),
+        redis_factory=MagicMock(return_value=fake_redis),
+    )
+
+    with TestClient(test_app) as client:
+        assert test_app.state.store is None
+        assert isinstance(test_app.state.identity_repository, PostgresIdentityProblemRepository)
+        assert isinstance(test_app.state.ticket_repository, RedisTicketRepository)
+        response = client.get("/health", headers={"Host": "api.school.example"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["environment"] == "production"
+    assert body["services"]["database"] == "ok"
+    assert body["services"]["redis"] == "ok"
+    pool.close.assert_awaited_once_with()
+    assert fake_redis.closed is True
+
+
 def test_postgres_health_reports_failed_ping() -> None:
     connection = AsyncMock()
     connection.fetchval.side_effect = RuntimeError("database unavailable")

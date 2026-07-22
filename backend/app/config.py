@@ -18,6 +18,12 @@ def _csv_env(name: str, default: str) -> tuple[str, ...]:
     return tuple(value.strip() for value in os.getenv(name, default).split(",") if value.strip())
 
 
+def _csv_env_with_flag(name: str, default: str) -> tuple[tuple[str, ...], bool]:
+    raw = os.getenv(name)
+    source = default if raw is None else raw
+    return tuple(value.strip() for value in source.split(",") if value.strip()), raw is not None
+
+
 def _bool_env(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -30,10 +36,10 @@ class Settings:
     app_env: str = field(default_factory=lambda: os.getenv("APP_ENV", "").strip().lower())
     api_prefix: str = field(default_factory=lambda: os.getenv("API_PREFIX", "/api/v1").rstrip("/"))
     allowed_origins: tuple[str, ...] = field(
-        default_factory=lambda: _csv_env("ALLOWED_ORIGINS", "http://localhost,http://127.0.0.1")
+        default_factory=lambda: _csv_env_with_flag("ALLOWED_ORIGINS", "http://localhost,http://127.0.0.1")[0]
     )
     allowed_hosts: tuple[str, ...] = field(
-        default_factory=lambda: _csv_env("ALLOWED_HOSTS", "localhost,127.0.0.1,testserver")
+        default_factory=lambda: _csv_env_with_flag("ALLOWED_HOSTS", "localhost,127.0.0.1,testserver")[0]
     )
     jwt_secret: str = field(default_factory=lambda: os.getenv("SECRET_KEY") or os.getenv("JWT_SECRET") or "")
     jwt_algorithm: str = "HS256"
@@ -53,6 +59,12 @@ class Settings:
     max_llm_retries: int = field(default_factory=lambda: int(os.getenv("MAX_LLM_RETRIES", "3")))
     llm_timeout_seconds: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT_SECONDS", "30")))
     use_mock_llm: bool = field(default_factory=lambda: _bool_env("USE_MOCK_LLM", False))
+    allowed_origins_configured: bool = field(
+        default_factory=lambda: _csv_env_with_flag("ALLOWED_ORIGINS", "http://localhost,http://127.0.0.1")[1]
+    )
+    allowed_hosts_configured: bool = field(
+        default_factory=lambda: _csv_env_with_flag("ALLOWED_HOSTS", "localhost,127.0.0.1,testserver")[1]
+    )
 
     def __post_init__(self) -> None:
         if not self.app_env:
@@ -74,20 +86,26 @@ class Settings:
                 raise RuntimeError("DEFAULT_TENANT_ID must be a valid UUID when PERSISTENCE_BACKEND=postgres") from exc
             object.__setattr__(self, "default_tenant_id", normalized_tenant)
         if self.app_env not in _DEVELOPMENT_ENVS:
-            if len(self.jwt_secret) < 32 or self.jwt_secret in _WEAK_SECRETS:
-                raise RuntimeError(
-                    "SECRET_KEY must be a strong value of at least 32 characters outside test/development"
-                )
-            if self.persistence_backend != "postgres" or not self.redis_url:
-                raise RuntimeError(
-                    "Production startup refused: configure PostgreSQL and Redis adapters before selecting "
-                    "APP_ENV outside test/development"
-                )
-            raise RuntimeError(
-                "Production startup refused: Qdrant/RAG and deployment gates remain not wired for production"
-            )
+            self._validate_production_readiness()
         if not self.jwt_secret:
             object.__setattr__(self, "jwt_secret", "phase1-development-secret-change-me")
+
+    def _validate_production_readiness(self) -> None:
+        if len(self.jwt_secret) < 32 or self.jwt_secret in _WEAK_SECRETS:
+            raise RuntimeError("SECRET_KEY must be a strong value of at least 32 characters outside test/development")
+        if self.persistence_backend != "postgres" or not self.redis_url:
+            raise RuntimeError(
+                "Production startup refused: configure PostgreSQL and Redis adapters before selecting "
+                "APP_ENV outside test/development"
+            )
+        if not self.allowed_origins_configured or any(
+            origin.startswith("http://localhost") for origin in self.allowed_origins
+        ):
+            raise RuntimeError("ALLOWED_ORIGINS must be explicitly configured for production")
+        if not self.allowed_hosts_configured or any(
+            host in {"localhost", "127.0.0.1", "testserver", "*"} for host in self.allowed_hosts
+        ):
+            raise RuntimeError("ALLOWED_HOSTS must be explicitly configured for production")
 
     @property
     def is_development(self) -> bool:

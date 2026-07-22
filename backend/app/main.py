@@ -37,7 +37,7 @@ def create_app(
     redis_factory: RedisFactory = create_redis_client,
 ) -> FastAPI:
     """Build an application with an explicit persistence adapter lifecycle."""
-    store = InMemoryRepository()
+    store = InMemoryRepository() if configured.is_development else None
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -46,7 +46,7 @@ def create_app(
         application.state.pool = None
         application.state.redis_client = None
         application.state.identity_repository = store
-        application.state.ticket_repository = MemoryTicketRepository(store.tickets)
+        application.state.ticket_repository = MemoryTicketRepository(store.tickets) if store is not None else None
         application.state.llm_grader = DeepSeekGradingClient(LLMClientConfig.from_settings(configured))
         if configured.persistence_backend == "postgres":
             pool = await pool_factory(configured.database_url or "")
@@ -65,7 +65,8 @@ def create_app(
             if pool is not None:
                 await pool.close()
             ticket_repository: TicketRepository = application.state.ticket_repository
-            await ticket_repository.close()
+            if ticket_repository is not None:
+                await ticket_repository.close()
             await application.state.llm_grader.close()
 
     application = FastAPI(title="翱翔启航 API", version="1.0.0", lifespan=lifespan)
@@ -77,7 +78,7 @@ def create_app(
     application.state.pool = None
     application.state.redis_client = None
     application.state.identity_repository = store
-    application.state.ticket_repository = MemoryTicketRepository(store.tickets)
+    application.state.ticket_repository = MemoryTicketRepository(store.tickets) if store is not None else None
     application.state.llm_grader = DeepSeekGradingClient(LLMClientConfig.from_settings(configured))
     application.add_middleware(TrustedHostMiddleware, allowed_hosts=list(configured.allowed_hosts))
     application.add_middleware(
