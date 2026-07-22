@@ -18,8 +18,9 @@ from app.api.routes import router
 from app.config import Settings, settings
 from app.core.errors import AppError, trace_id
 from app.db.pool import create_pool
+from app.db.session import tenant_conn, tenant_context
 from app.domain.memory import InMemoryRepository
-from app.domain.postgres import PostgresIdentityProblemRepository
+from app.domain.postgres import NIL_SYSTEM_USER_ID, PostgresIdentityProblemRepository
 from app.grading import DeepSeekGradingClient, LLMClientConfig
 from app.rag import QdrantIndexer, QdrantIndexerConfig
 from app.realtime import MemoryTicketRepository, RedisTicketRepository, TicketRepository
@@ -43,14 +44,16 @@ async def pending_hitl_count(request: Request, pool: asyncpg.Pool | None) -> int
     if pool is None:
         return 0
     try:
-        async with pool.acquire() as connection:
-            count = await connection.fetchval(
-                """
-                SELECT COUNT(*)
-                FROM human_review_queue
-                WHERE status = 'pending'
-                """
-            )
+        configured: Settings = request.app.state.settings
+        with tenant_context(configured.default_tenant_id or "", "worker"):
+            async with tenant_conn(pool, user_id=NIL_SYSTEM_USER_ID) as connection:
+                count = await connection.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM human_review_queue
+                    WHERE status = 'pending'
+                    """
+                )
     except Exception:
         return 0
     return int(count or 0)

@@ -146,6 +146,7 @@ def test_redis_ticket_repository_health_and_shutdown_lifecycle() -> None:
 
 def test_production_lifecycle_uses_external_adapters_without_memory_store() -> None:
     connection = AsyncMock()
+    connection.transaction = MagicMock(return_value=AsyncContext(None))
     connection.fetchval.side_effect = [1, 2]
     pool = MagicMock()
     pool.acquire.return_value = AsyncContext(connection)
@@ -185,6 +186,13 @@ def test_production_lifecycle_uses_external_adapters_without_memory_store() -> N
     assert body["grading"] == {"active_requests": 0, "pending_hitl_count": 2}
     assert service(body, "redis")["status"] == "ok"
     assert service(body, "qdrant") == {"status": "ok", "latency_ms": None, "backend": "qdrant-configured"}
+    context_sql, tenant_arg, user_arg, role_arg = connection.execute.await_args.args
+    assert "app.current_tenant_id" in context_sql
+    assert (tenant_arg, user_arg, role_arg) == (
+        TENANT,
+        "00000000-0000-0000-0000-000000000000",
+        "worker",
+    )
     pool.close.assert_awaited_once_with()
     assert fake_redis.closed is True
     assert fake_rag.closed is True
