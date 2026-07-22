@@ -36,10 +36,25 @@ class HarnessMetrics:
 @dataclass(frozen=True)
 class HarnessReport:
     metrics: HarnessMetrics
-    failures: tuple[str, ...]
+    failures: tuple[dict[str, Any], ...]
+    error_cls_accuracy: float
+    calibration_error: float
+    coverage_matrix: dict[str, Any]
 
     def as_dict(self) -> dict[str, Any]:
-        return {"metrics": self.metrics.as_dict(), "failures": list(self.failures)}
+        return {
+            "metrics": self.metrics.as_dict(),
+            "failures": list(self.failures),
+            "error_cls_accuracy": self.error_cls_accuracy,
+            "calibration_error": self.calibration_error,
+            "coverage_matrix": self.coverage_matrix,
+        }
+
+
+@dataclass(frozen=True)
+class HarnessPrediction:
+    is_correct: bool | None
+    confidence: float | None
 
 
 def load_cases(source: str | Path) -> list[dict[str, Any]]:
@@ -75,6 +90,62 @@ def compute_metrics(actual: Iterable[bool | None], expected: Iterable[bool]) -> 
     )
 
 
+def _coverage_matrix(cases: list[dict[str, Any]], predictions: list[HarnessPrediction]) -> dict[str, Any]:
+    matrix: dict[str, Any] = {}
+    for case, prediction in zip(cases, predictions, strict=True):
+        grade_key = f"grade{case['grade']}"
+        type_bucket = matrix.setdefault(grade_key, {}).setdefault(case["question_type"], {})
+        bucket = type_bucket.setdefault(case["difficulty"], {"total": 0, "covered": 0, "correct": 0, "accuracy": 0.0})
+        bucket["total"] += 1
+        if prediction.is_correct is not None:
+            bucket["covered"] += 1
+            bucket["correct"] += int(prediction.is_correct == bool(case["expected_correct"]))
+    for grade_bucket in matrix.values():
+        for type_bucket in grade_bucket.values():
+            for bucket in type_bucket.values():
+                bucket["accuracy"] = round(bucket["correct"] / bucket["covered"], 4) if bucket["covered"] else 0.0
+    return matrix
+
+
+def _calibration_error(cases: list[dict[str, Any]], predictions: list[HarnessPrediction]) -> float:
+    errors = [
+        abs((prediction.confidence or 0.0) - float(prediction.is_correct == bool(case["expected_correct"])))
+        for case, prediction in zip(cases, predictions, strict=True)
+        if prediction.is_correct is not None and prediction.confidence is not None
+    ]
+    return round(sum(errors) / len(errors), 4) if errors else 0.0
+
+
+def _failure_details(cases: list[dict[str, Any]], predictions: list[HarnessPrediction]) -> tuple[dict[str, Any], ...]:
+    return tuple(
+        {
+            "case_id": case["id"],
+            "question_type": case["question_type"],
+            "grade": case["grade"],
+            "difficulty": case["difficulty"],
+            "expected_correct": bool(case["expected_correct"]),
+            "actual_correct": prediction.is_correct,
+            "actual_confidence": prediction.confidence,
+            "issue": "uncovered" if prediction.is_correct is None else "correctness_mismatch",
+        }
+        for case, prediction in zip(cases, predictions, strict=True)
+        if prediction.is_correct != bool(case["expected_correct"])
+    )
+
+
+def _build_report(cases: list[dict[str, Any]], predictions: list[HarnessPrediction]) -> HarnessReport:
+    expected = [bool(case["expected_correct"]) for case in cases]
+    actual = [prediction.is_correct for prediction in predictions]
+    metrics = compute_metrics(actual, expected)
+    return HarnessReport(
+        metrics=metrics,
+        failures=_failure_details(cases, predictions),
+        error_cls_accuracy=metrics.accuracy,
+        calibration_error=_calibration_error(cases, predictions),
+        coverage_matrix=_coverage_matrix(cases, predictions),
+    )
+
+
 def select_cases(
     cases: Iterable[dict[str, Any]],
     *,
@@ -102,12 +173,13 @@ class HarnessRunner:
         self.use_mock = use_mock
         self.engine = GradingEngine()
 
-    def _predict(self, case: dict[str, Any]) -> bool | None:
+    def _predict(self, case: dict[str, Any]) -> HarnessPrediction:
         # Mock mode is deliberately local and deterministic. A real provider can be
         # integrated here without changing dataset or metrics contracts.
         if not self.use_mock:
             raise RuntimeError("real LLM runner is not configured; pass --mock")
-        return self.engine.grade(self._request_from_case(case)).is_correct
+        result = self.engine.grade(self._request_from_case(case))
+        return HarnessPrediction(result.is_correct, result.confidence)
 
     @staticmethod
     def _request_from_case(case: dict[str, Any]) -> GradeRequest:
@@ -120,15 +192,16 @@ class HarnessRunner:
             hint_level=case.get("hint_level", 0),
         )
 
-    async def _predict_with_llm(self, case: dict[str, Any], llm_grader: LLMHarnessGrader) -> bool | None:
+    async def _predict_with_llm(self, case: dict[str, Any], llm_grader: LLMHarnessGrader) -> HarnessPrediction:
         request = self._request_from_case(case)
         try:
             verdict = await llm_grader.verdict(request)
         except (LLMUnavailableError, ValueError):
-            return None
+            return HarnessPrediction(None, None)
         if verdict is None:
-            return None
-        return self.engine.grade(request, verdict).is_correct
+            return HarnessPrediction(None, None)
+        result = self.engine.grade(request, verdict)
+        return HarnessPrediction(result.is_correct, result.confidence)
 
     def run(
         self,
@@ -140,13 +213,7 @@ class HarnessRunner:
         cases = load_cases(source) if isinstance(source, (str, Path)) else list(source)
         cases = select_cases(cases, sample_rate=sample_rate, grade_levels=grade_levels)
         predictions = [self._predict(case) for case in cases]
-        expected = [bool(case["expected_correct"]) for case in cases]
-        failures = tuple(
-            case["id"]
-            for case, prediction, truth in zip(cases, predictions, expected, strict=True)
-            if prediction != truth
-        )
-        return HarnessReport(compute_metrics(predictions, expected), failures)
+        return _build_report(cases, predictions)
 
     async def run_async(
         self,
@@ -163,10 +230,4 @@ class HarnessRunner:
         cases = load_cases(source) if isinstance(source, (str, Path)) else list(source)
         cases = select_cases(cases, sample_rate=sample_rate, grade_levels=grade_levels)
         predictions = [await self._predict_with_llm(case, llm_grader) for case in cases]
-        expected = [bool(case["expected_correct"]) for case in cases]
-        failures = tuple(
-            case["id"]
-            for case, prediction, truth in zip(cases, predictions, expected, strict=True)
-            if prediction != truth
-        )
-        return HarnessReport(compute_metrics(predictions, expected), failures)
+        return _build_report(cases, predictions)

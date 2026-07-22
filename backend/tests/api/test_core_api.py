@@ -468,6 +468,9 @@ def test_admin_classes_stats_password_reset_and_ops_jobs(client: TestClient):
     assert harness_detail.status_code == 200
     assert harness_detail.json()["data"]["status"] == "completed"
     assert harness_detail.json()["data"]["accuracy"] >= 0.94
+    assert harness_detail.json()["data"]["error_cls_accuracy"] >= 0.94
+    assert harness_detail.json()["data"]["calibration_error"] >= 0
+    assert harness_detail.json()["data"]["coverage_matrix"]["grade1"]["calculation"]["easy"]["total"] == 5
 
     sampled_harness = client.post(
         "/api/v1/ops/harness/run",

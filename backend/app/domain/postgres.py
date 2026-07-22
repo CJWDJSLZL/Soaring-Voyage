@@ -2396,7 +2396,7 @@ class PostgresIdentityProblemRepository:
                 )
                 VALUES (
                     'completed', 'manual', 'local', $1, $2, $3,
-                    $4::jsonb, $5, $6, $7, NULL, NULL, '{}'::jsonb, $8, 0.94, 0
+                    $4::jsonb, $5, $6, $7, $8, $9, $10::jsonb, $11, 0.94, 0
                 )
                 RETURNING id
                 """,
@@ -2407,6 +2407,9 @@ class PostgresIdentityProblemRepository:
                 metrics["accuracy"],
                 metrics["false_positive_rate"],
                 metrics["false_negative_rate"],
+                report.get("error_cls_accuracy"),
+                report.get("calibration_error"),
+                json.dumps(report.get("coverage_matrix", {}), ensure_ascii=False),
                 not failures,
             )
         return {

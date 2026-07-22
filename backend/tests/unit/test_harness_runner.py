@@ -62,6 +62,11 @@ def test_mock_runner_passes_full_dataset() -> None:
     assert report.metrics.total == 180
     assert report.metrics.coverage == 1.0
     assert report.metrics.accuracy >= 0.94
+    assert report.error_cls_accuracy == report.metrics.accuracy
+    assert 0 <= report.calibration_error <= 1
+    assert report.coverage_matrix["grade1"]["calculation"]["easy"]["total"] == 5
+    assert report.coverage_matrix["grade1"]["calculation"]["easy"]["accuracy"] == 1.0
+    assert report.as_dict()["coverage_matrix"]
 
 
 def test_select_cases_filters_grade_levels_and_samples_deterministically() -> None:
@@ -80,6 +85,7 @@ def test_runner_applies_requested_case_selection() -> None:
     assert report.metrics.total == 30
     assert report.metrics.coverage == 1.0
     assert report.metrics.accuracy >= 0.94
+    assert report.coverage_matrix["grade1"]
 
 
 @pytest.mark.asyncio
