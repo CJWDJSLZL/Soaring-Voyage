@@ -16,6 +16,22 @@ def test_second_migration_adds_nonnegative_token_version_without_rewriting_initi
     assert "check (token_version >= 0)" in second
 
 
+def test_third_migration_accepts_grading_engine_sources_and_broadens_error_history() -> None:
+    migrations = ROOT / "backend" / "migrations"
+    initial = (migrations / "001_initial_schema.sql").read_text(encoding="utf-8").lower()
+    third = (migrations / "003_grading_source_values.sql").read_text(encoding="utf-8").lower()
+
+    assert "sympy_llm_consensus" not in initial
+    assert "alter table grading_results" in third
+    assert "drop constraint if exists grading_results_source_check" in third
+    assert "sympy_llm_consensus" in third
+    assert "sympy_llm_conflict" in third
+    assert "llm_only" in third
+    assert "empty_answer" in third
+    assert "new.source <> 'pending_human_review'" in third
+    assert "coalesce(new.agent_trace->>'knowledge_point', p.tags[1])" in third
+
+
 def test_ci_prepares_and_runs_runtime_role_postgres_integration() -> None:
     workflow_text = (ROOT / ".github" / "workflows" / "backend-ci.yml").read_text(encoding="utf-8")
     workflow = workflow_text.lower()
