@@ -293,12 +293,14 @@ class PostgresIdentityProblemRepository:
         page_size: int,
     ) -> JsonDict:
         where = ["NOT is_deleted"]
-        arguments: list[Any] = [user.tenant_id]
         if source == "school":
+            arguments: list[Any] = [user.tenant_id]
             where.append("tenant_id = $1")
         elif source == "public":
+            arguments = []
             where.append("tenant_id IS NULL")
         else:
+            arguments = [user.tenant_id]
             where.append("(tenant_id = $1 OR tenant_id IS NULL)")
         if grade_levels:
             arguments.append(grade_levels)

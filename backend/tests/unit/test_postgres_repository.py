@@ -290,6 +290,37 @@ async def test_problem_insert_and_list_are_tenant_scoped_and_deterministically_o
 
 
 @pytest.mark.asyncio
+async def test_public_problem_list_does_not_bind_unused_tenant_argument() -> None:
+    connection = AsyncMock()
+    connection.fetchval.return_value = 0
+    connection.fetch.return_value = []
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    user = PostgresIdentityProblemRepository.user_from_row(user_row())
+
+    await repository.list_catalog_problems(
+        user,
+        grade_levels=[2, 3],
+        problem_type=None,
+        difficulty=None,
+        keyword=None,
+        tags=["addition"],
+        source="public",
+        page_number=1,
+        page_size=20,
+    )
+
+    count_sql, grade_levels, tags = connection.fetchval.await_args.args
+    list_sql, list_grade_levels, list_tags, page_size, offset = connection.fetch.await_args.args
+    assert "tenant_id IS NULL" in count_sql
+    assert "tenant_id = $1" not in count_sql
+    assert "grade_level = ANY($1::int[])" in count_sql
+    assert "tags @> $2::varchar[]" in count_sql
+    assert (grade_levels, tags) == ([2, 3], ["addition"])
+    assert "grade_level = ANY($1::int[])" in list_sql
+    assert (list_grade_levels, list_tags, page_size, offset) == ([2, 3], ["addition"], 20, 0)
+
+
+@pytest.mark.asyncio
 async def test_bulk_import_problems_inserts_rows_and_completed_job() -> None:
     connection = AsyncMock()
     first_id = UUID("77777777-7777-4777-8777-777777777777")
