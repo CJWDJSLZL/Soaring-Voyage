@@ -186,6 +186,59 @@ class PostgresIdentityProblemRepository:
             )
         return str(problem_id)
 
+    async def bulk_import_problems(self, user: User, rows: list[dict[str, Any]], payload: dict[str, Any]) -> JsonDict:
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            created_ids: list[str] = []
+            failed_rows: list[JsonDict] = []
+            for row in rows:
+                try:
+                    problem_id = await connection.fetchval(
+                        """
+                        INSERT INTO problems (
+                            tenant_id, created_by, problem_type, grade_level, difficulty,
+                            curriculum_version, problem_text, reference_answer,
+                            solution_steps, common_errors, tags
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11)
+                        RETURNING id
+                        """,
+                        user.tenant_id,
+                        user.user_id,
+                        row["problem_type"],
+                        row["grade_level"],
+                        row["difficulty"],
+                        payload["curriculum_version"],
+                        row["problem_text"],
+                        row["reference_answer"],
+                        json.dumps(row.get("solution_steps", []), ensure_ascii=False),
+                        json.dumps(row.get("common_errors", []), ensure_ascii=False),
+                        row.get("tags", []),
+                    )
+                    created_ids.append(str(problem_id))
+                except Exception as exc:
+                    failed_rows.append({"row": row["row"], "problem_text": row["problem_text"], "reason": str(exc)})
+            result = {
+                "total": len(rows),
+                "success": len(created_ids),
+                "failed": len(failed_rows),
+                "problem_ids": created_ids,
+                "failed_rows": failed_rows,
+            }
+            status = "succeeded" if not failed_rows else "failed"
+            job = await connection.fetchrow(
+                """
+                INSERT INTO jobs (tenant_id, job_type, status, payload, result, attempts, created_by)
+                VALUES ($1, 'bulk_import_problems', $2, $3::jsonb, $4::jsonb, 1, $5)
+                RETURNING id, status
+                """,
+                user.tenant_id,
+                status,
+                json.dumps(payload, ensure_ascii=False),
+                json.dumps(result, ensure_ascii=False),
+                user.user_id,
+            )
+        return {"import_job_id": str(job["id"]), "status": job["status"], **result}
+
     @staticmethod
     def _json_value(value: Any, default: Any) -> Any:
         if value is None:

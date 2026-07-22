@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Literal, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, Query, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 
 from app.core.errors import AppError, envelope, utcnow
@@ -19,7 +19,7 @@ from app.domain.models import Ticket, User
 from app.domain.repository import IdentityProblemRepository, Repository
 from app.grading import DeepSeekGradingClient, GradeRequest, LLMUnavailableError, LLMVerdict, QuestionType, route_grade
 from app.harness import HarnessRunner
-from app.imports import parse_student_import
+from app.imports import parse_problem_import, parse_student_import
 
 from .dependencies import current_user, get_identity_repository, get_llm_grader, get_store, require_roles
 from .schemas import (
@@ -299,6 +299,37 @@ async def create_problem(
 ):
     problem_id = await repository.create_catalog_problem(user, payload.model_dump())
     return envelope(request, {"problem_id": problem_id, "embedding_status": "pending", "message": "题目已创建"})
+
+
+@router.post("/problems/bulk-import", status_code=202)
+async def bulk_import_problems(
+    request: Request,
+    file: UploadFile = File(...),
+    curriculum_version: str = Form("renjiao"),
+    user: User = Depends(require_roles("teacher", "admin", "sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    try:
+        imported_rows = parse_problem_import(file.filename or "problems.csv", await file.read())
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise AppError(422, 4022, "请求参数校验失败", str(exc)) from exc
+    rows = [
+        {
+            "row": row.row_number,
+            "problem_text": row.problem_text,
+            "problem_type": row.problem_type,
+            "reference_answer": row.reference_answer,
+            "grade_level": row.grade_level,
+            "difficulty": row.difficulty,
+            "solution_steps": row.solution_steps,
+            "common_errors": row.common_errors,
+            "tags": row.tags,
+        }
+        for row in imported_rows
+    ]
+    return envelope(
+        request, await repository.bulk_import_problems(user, rows, {"curriculum_version": curriculum_version})
+    )
 
 
 @router.get("/problems/")

@@ -104,6 +104,38 @@ def test_rbac_problem_assignment_and_student_answer_isolation(client: TestClient
     assert detail.json()["data"]["problems"][0]["problem_id"] == problem_id
 
 
+def test_teacher_bulk_import_problems_from_csv(client: TestClient):
+    teacher = login(client, "teacher")
+    student = login(client, "student")
+    denied = client.post(
+        "/api/v1/problems/bulk-import", headers=auth(student), files={"file": ("p.csv", b"", "text/csv")}
+    )
+    assert denied.status_code == 403
+    csv_body = (
+        "problem_text,problem_type,reference_answer,grade_level,difficulty,solution_steps,tags\n"
+        "1 + 1 = ___,arithmetic,2,1,easy,先算个位;写出结果,加法;一年级\n"
+        "下面哪个等于 4,multiple_choice,B,1,easy,逐个算选项,选择题\n"
+    ).encode()
+
+    imported = client.post(
+        "/api/v1/problems/bulk-import",
+        headers=auth(teacher),
+        files={"file": ("problems.csv", csv_body, "text/csv")},
+        data={"curriculum_version": "renjiao"},
+    )
+
+    assert imported.status_code == 202, imported.text
+    data = imported.json()["data"]
+    assert data["status"] == "succeeded"
+    assert data["success"] == 2
+    assert data["failed"] == 0
+    listed = client.get("/api/v1/problems/?grade_level=1", headers=auth(teacher))
+    assert listed.status_code == 200
+    assert data["problem_ids"][0] in {item["problem_id"] for item in listed.json()["data"]["items"]}
+    job = client.get(f"/api/v1/ops/jobs/{data['import_job_id']}", headers=auth(teacher))
+    assert job.status_code == 403
+
+
 def test_core_submission_hint_and_duplicate_loop(client: TestClient):
     teacher = login(client, "teacher")
     student = login(client, "student")

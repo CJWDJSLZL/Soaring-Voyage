@@ -114,6 +114,50 @@ class InMemoryRepository:
         }
         return problem_id
 
+    async def bulk_import_problems(self, user: User, rows: list[dict[str, Any]], payload: dict[str, Any]) -> JsonDict:
+        job_id = str(uuid4())
+        now = utcnow().isoformat()
+        created_ids: list[str] = []
+        failed_rows: list[JsonDict] = []
+        for row in rows:
+            try:
+                problem_id = await self.create_catalog_problem(
+                    user,
+                    {
+                        "problem_text": row["problem_text"],
+                        "problem_type": row["problem_type"],
+                        "reference_answer": row["reference_answer"],
+                        "grade_level": row["grade_level"],
+                        "difficulty": row["difficulty"],
+                        "curriculum_version": payload["curriculum_version"],
+                        "solution_steps": row.get("solution_steps", []),
+                        "common_errors": row.get("common_errors", []),
+                        "tags": row.get("tags", []),
+                    },
+                )
+                created_ids.append(problem_id)
+            except Exception as exc:
+                failed_rows.append({"row": row["row"], "problem_text": row["problem_text"], "reason": str(exc)})
+        result = {
+            "total": len(rows),
+            "success": len(created_ids),
+            "failed": len(failed_rows),
+            "problem_ids": created_ids,
+            "failed_rows": failed_rows,
+        }
+        self.jobs[job_id] = {
+            "job_id": job_id,
+            "job_type": "bulk_import_problems",
+            "status": "succeeded" if not failed_rows else "failed",
+            "progress": 1.0,
+            "created_at": now,
+            "updated_at": now,
+            "created_by": user.user_id,
+            "payload": payload,
+            "result": result,
+        }
+        return {"import_job_id": job_id, "status": self.jobs[job_id]["status"], **result}
+
     async def list_catalog_problems(
         self,
         user: User,

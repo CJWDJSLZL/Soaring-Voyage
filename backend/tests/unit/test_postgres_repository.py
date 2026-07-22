@@ -257,6 +257,56 @@ async def test_problem_insert_and_list_are_tenant_scoped_and_deterministically_o
 
 
 @pytest.mark.asyncio
+async def test_bulk_import_problems_inserts_rows_and_completed_job() -> None:
+    connection = AsyncMock()
+    first_id = UUID("77777777-7777-4777-8777-777777777777")
+    second_id = UUID("88888888-8888-4888-8888-888888888888")
+    job_id = UUID("99999999-9999-4999-8999-999999999999")
+    connection.fetchval.side_effect = [first_id, second_id]
+    connection.fetchrow.return_value = {"id": job_id, "status": "succeeded"}
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    teacher = PostgresIdentityProblemRepository.user_from_row(user_row())
+
+    result = await repository.bulk_import_problems(
+        teacher,
+        [
+            {
+                "row": 2,
+                "problem_text": "1 + 1 = ___",
+                "problem_type": "arithmetic",
+                "reference_answer": "2",
+                "grade_level": 1,
+                "difficulty": "easy",
+                "solution_steps": ["add"],
+                "common_errors": [],
+                "tags": ["addition"],
+            },
+            {
+                "row": 3,
+                "problem_text": "选择题",
+                "problem_type": "multiple_choice",
+                "reference_answer": "B",
+                "grade_level": 1,
+                "difficulty": "easy",
+                "solution_steps": [],
+                "common_errors": [],
+                "tags": ["choice"],
+            },
+        ],
+        {"curriculum_version": "renjiao"},
+    )
+
+    assert result["import_job_id"] == str(job_id)
+    assert result["status"] == "succeeded"
+    assert result["success"] == 2
+    assert result["problem_ids"] == [str(first_id), str(second_id)]
+    insert_sql = connection.fetchval.await_args_list[0].args[0]
+    assert "INSERT INTO problems" in insert_sql
+    job_sql = connection.fetchrow.await_args.args[0]
+    assert "bulk_import_problems" in job_sql
+
+
+@pytest.mark.asyncio
 async def test_submit_assignment_persists_answer_grading_and_review_queue() -> None:
     connection = AsyncMock()
     submitted_at = datetime(2026, 1, 1, tzinfo=UTC)
