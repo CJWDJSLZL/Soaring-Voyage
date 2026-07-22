@@ -738,6 +738,62 @@ class PostgresIdentityProblemRepository:
                 user.tenant_id,
                 normalized_assignment_id,
             )
+            alert_rows = await connection.fetch(
+                """
+                WITH latest AS (
+                  SELECT DISTINCT ON (gr.submission_id, gr.problem_id)
+                         gr.id AS grading_result_id,
+                         s.student_id,
+                         gr.problem_id,
+                         gr.is_correct,
+                         gr.error_type,
+                         p.tags
+                  FROM grading_results gr
+                  JOIN submissions s ON s.tenant_id = gr.tenant_id AND s.id = gr.submission_id
+                  JOIN problems p ON p.id = gr.problem_id
+                  WHERE gr.tenant_id = $1 AND s.assignment_id = $2
+                  ORDER BY gr.submission_id, gr.problem_id, gr.attempt_number DESC
+                ),
+                tagged AS (
+                  SELECT latest.*,
+                         tag,
+                         COALESCE(NULLIF(seh.knowledge_point, ''), tag) AS alert_point
+                  FROM latest
+                  CROSS JOIN LATERAL unnest(
+                    CASE WHEN cardinality(latest.tags) > 0
+                         THEN latest.tags
+                         ELSE ARRAY[COALESCE(latest.error_type, 'unknown')]
+                    END
+                  ) AS tag
+                  LEFT JOIN student_error_history seh
+                    ON seh.tenant_id = $1
+                   AND seh.grading_result_id = latest.grading_result_id
+                ),
+                totals AS (
+                  SELECT tag AS knowledge_point, COUNT(*) AS total_results
+                  FROM tagged
+                  GROUP BY tag
+                ),
+                wrong AS (
+                  SELECT alert_point AS knowledge_point,
+                         COUNT(DISTINCT student_id) AS affected_student_count
+                  FROM tagged
+                  WHERE is_correct IS FALSE
+                  GROUP BY alert_point
+                )
+                SELECT wrong.knowledge_point,
+                       wrong.affected_student_count,
+                       totals.total_results,
+                       wrong.affected_student_count::double precision / totals.total_results AS error_rate
+                FROM wrong
+                JOIN totals ON totals.knowledge_point = wrong.knowledge_point
+                WHERE wrong.affected_student_count::double precision / totals.total_results >= 0.4
+                ORDER BY error_rate DESC, wrong.knowledge_point
+                LIMIT 5
+                """,
+                user.tenant_id,
+                normalized_assignment_id,
+            )
         total_students_int = int(total_students or 0)
         submitted_count_int = int(submitted_count or 0)
         total_results = int(overall["total_results"] or 0)
@@ -779,7 +835,16 @@ class PostgresIdentityProblemRepository:
             "average_accuracy": round(correct_results / total_results, 3) if total_results else 0.0,
             "problem_stats": problem_stats,
             "error_distribution": error_distribution,
-            "knowledge_point_alerts": [],
+            "knowledge_point_alerts": [
+                {
+                    "knowledge_point": row["knowledge_point"],
+                    "error_rate": round(float(row["error_rate"] or 0), 3),
+                    "alert_level": "high",
+                    "alert": "超过40%学生在此知识点出错，建议重点讲解",
+                    "affected_student_count": int(row["affected_student_count"] or 0),
+                }
+                for row in alert_rows
+            ],
         }
 
     async def patch_assignment(self, user: User, assignment_id: str, payload: dict[str, Any]) -> JsonDict:

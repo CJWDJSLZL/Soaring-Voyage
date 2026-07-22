@@ -457,20 +457,23 @@ async def test_assignment_stats_checks_visibility_and_aggregates_problem_results
         {"total_results": 2, "correct_results": 1},
     ]
     connection.fetchval.side_effect = [3, 2]
-    connection.fetch.return_value = [
-        {
-            "id": UUID(PROBLEM_ID),
-            "problem_text": "1 + 1 = ___",
-            "position": 1,
-            "total_attempts": 3,
-            "correct_first_try": 1,
-            "answered_count": 2,
-            "correct_after_hint": 0,
-            "still_wrong": 1,
-            "pending_review": 0,
-            "avg_hint_used": 0.5,
-            "error_counts": {"计算错误": 1},
-        }
+    connection.fetch.side_effect = [
+        [
+            {
+                "id": UUID(PROBLEM_ID),
+                "problem_text": "1 + 1 = ___",
+                "position": 1,
+                "total_attempts": 3,
+                "correct_first_try": 1,
+                "answered_count": 2,
+                "correct_after_hint": 0,
+                "still_wrong": 1,
+                "pending_review": 0,
+                "avg_hint_used": 0.5,
+                "error_counts": {"计算错误": 1},
+            }
+        ],
+        [{"knowledge_point": "addition", "affected_student_count": 1, "total_results": 2, "error_rate": 0.5}],
     ]
     repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
     teacher = PostgresIdentityProblemRepository.user_from_row(user_row())
@@ -482,10 +485,20 @@ async def test_assignment_stats_checks_visibility_and_aggregates_problem_results
     assert stats["submission_rate"] == 0.667
     assert stats["average_accuracy"] == 0.5
     assert stats["problem_stats"][0]["accuracy_first_try"] == 0.5
+    assert stats["knowledge_point_alerts"] == [
+        {
+            "knowledge_point": "addition",
+            "error_rate": 0.5,
+            "alert_level": "high",
+            "alert": "超过40%学生在此知识点出错，建议重点讲解",
+            "affected_student_count": 1,
+        }
+    ]
     assert stats["problem_stats"][0]["top_error_types"] == [{"error_type": "计算错误", "count": 1, "percentage": 0.5}]
     fetched_sql = "\n".join(call.args[0] for call in connection.fetch.await_args_list)
     assert "assignment_problems" in fetched_sql
     assert "grading_results" in fetched_sql
+    assert "student_error_history" in fetched_sql
 
 
 @pytest.mark.asyncio
