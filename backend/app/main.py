@@ -70,23 +70,7 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
     async def request_trace(request: Request, call_next: Callable[..., Awaitable[Any]]):
         supplied = request.headers.get("X-Trace-ID", "")
         request.state.trace_id = supplied if supplied.startswith("req-") else f"req-{uuid4()}"
-        path = request.url.path
-        unported_exact = {f"{configured.api_prefix}/auth/sse-ticket"}
-        unported_submission_suffixes = ("/events",)
-        if configured.persistence_backend == "postgres" and (
-            path in unported_exact or any(path.endswith(suffix) for suffix in unported_submission_suffixes)
-        ):
-            response = JSONResponse(
-                status_code=503,
-                content={
-                    "code": 5003,
-                    "message": "该工作流尚未迁移到 PostgreSQL",
-                    "detail": "当前 PostgreSQL 阶段支持认证、题库、作业、提交、提示和人工复核；SSE 仍在迁移中",
-                    "trace_id": request.state.trace_id,
-                },
-            )
-        else:
-            response = await call_next(request)
+        response = await call_next(request)
         response.headers["X-Trace-ID"] = request.state.trace_id
         return response
 

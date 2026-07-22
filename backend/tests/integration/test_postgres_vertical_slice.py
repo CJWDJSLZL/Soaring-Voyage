@@ -184,6 +184,13 @@ async def test_runtime_role_rls_identity_token_version_and_problem_persistence()
             detail = client.get(f"/api/v1/assignments/{assignment_id}", headers=authorization)
             assert detail.status_code == 200
             assert detail.json()["data"]["problems"][0]["problem_id"] == api_problem_id
+            patched = client.patch(
+                f"/api/v1/assignments/{assignment_id}",
+                headers=authorization,
+                json={"title": "Integration Assignment Updated"},
+            )
+            assert patched.status_code == 200
+            assert patched.json()["data"]["title"] == "Integration Assignment Updated"
 
             student_login = client.post(
                 "/api/v1/auth/login",
@@ -259,13 +266,19 @@ async def test_runtime_role_rls_identity_token_version_and_problem_persistence()
             assert hinted_detail.status_code == 200
             assert hinted_detail.json()["data"]["status"] == "graded"
 
+            ticket = client.post(
+                "/api/v1/auth/sse-ticket",
+                headers=student_auth,
+                json={"submission_id": submission_data["submission_id"]},
+            )
+            assert ticket.status_code == 200
             events = client.get(
                 f"/api/v1/submissions/{submission_data['submission_id']}/events",
-                headers=student_auth,
-                params={"sse_ticket": "ticket"},
+                params={"sse_ticket": ticket.json()["data"]["ticket"], "follow": "false"},
             )
-            assert events.status_code == 503
-            assert events.json()["code"] == 5003
+            assert events.status_code == 200
+            assert "event: grading_update" in events.text
+            assert submission_data["submission_id"] in events.text
 
         other_tenant = str(uuid4())
         with tenant_context(other_tenant, "worker"):

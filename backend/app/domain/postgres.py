@@ -11,7 +11,7 @@ import asyncpg
 
 from app.core.errors import AppError
 from app.db.session import tenant_conn, tenant_context
-from app.domain.models import JsonDict, User
+from app.domain.models import JsonDict, Ticket, User
 
 NIL_SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000"
 
@@ -509,6 +509,162 @@ class PostgresIdentityProblemRepository:
                 else None
             )
         return data
+
+    async def patch_assignment(self, user: User, assignment_id: str, payload: dict[str, Any]) -> JsonDict:
+        normalized_assignment_id = self._uuid_text(assignment_id, "assignment_id")
+        add_problem_ids = list(payload.get("add_problem_ids") or [])
+        remove_problem_ids = list(payload.get("remove_problem_ids") or [])
+        if (
+            len(add_problem_ids) != len(set(add_problem_ids))
+            or len(remove_problem_ids) != len(set(remove_problem_ids))
+            or set(add_problem_ids) & set(remove_problem_ids)
+        ):
+            raise AppError(422, 4022, "请求参数校验失败", "problem patch ids must be unique and disjoint")
+        add_problem_ids = [self._uuid_text(value, "problem_id") for value in add_problem_ids]
+        remove_problem_ids = [self._uuid_text(value, "problem_id") for value in remove_problem_ids]
+        class_ids = payload.get("class_ids")
+        if class_ids is not None:
+            class_ids = [self._uuid_text(value, "class_id") for value in class_ids]
+            if len(class_ids) != len(set(class_ids)):
+                raise AppError(422, 4022, "请求参数校验失败", "class_ids must be unique")
+            if user.role == "teacher" and not set(class_ids).issubset(set(user.class_ids)):
+                raise AppError(403, 4003, "教师只能向本人班级布置作业")
+
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            assignment = await connection.fetchrow(
+                """
+                SELECT a.id, a.title, a.due_date,
+                       array_agg(DISTINCT ac.class_id ORDER BY ac.class_id) AS class_ids
+                FROM assignments a
+                JOIN assignment_classes ac ON ac.tenant_id = a.tenant_id AND ac.assignment_id = a.id
+                WHERE a.tenant_id = $1 AND a.id = $2 AND NOT a.is_deleted
+                GROUP BY a.id, a.title, a.due_date
+                """,
+                user.tenant_id,
+                normalized_assignment_id,
+            )
+            if assignment is None:
+                raise AppError(404, 4004, "作业不存在")
+            existing_class_ids = {str(value) for value in assignment["class_ids"]}
+            if user.role == "teacher" and not existing_class_ids.issubset(set(user.class_ids)):
+                raise AppError(403, 4003, "教师只能修改完全属于本人班级的作业")
+            if user.role not in {"admin", "sysadmin", "teacher"}:
+                raise AppError(403, 4003, "权限不足")
+            if self._assignment_status(assignment["due_date"]) == "expired":
+                raise AppError(409, 4005, "作业已截止，不可修改")
+
+            current_rows = await connection.fetch(
+                """
+                SELECT problem_id
+                FROM assignment_problems
+                WHERE tenant_id = $1 AND assignment_id = $2
+                ORDER BY position
+                """,
+                user.tenant_id,
+                normalized_assignment_id,
+            )
+            current_problem_ids = [str(row["problem_id"]) for row in current_rows]
+            all_problem_ids = add_problem_ids + remove_problem_ids
+            if all_problem_ids:
+                problem_rows = await connection.fetch(
+                    """
+                    SELECT id FROM problems
+                    WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND NOT is_deleted
+                    """,
+                    user.tenant_id,
+                    all_problem_ids,
+                )
+                found_problem_ids = {str(row["id"]) for row in problem_rows}
+                if set(all_problem_ids) != found_problem_ids:
+                    raise AppError(404, 4004, "题目不存在")
+
+            resulting_ids = [problem_id for problem_id in current_problem_ids if problem_id not in remove_problem_ids]
+            resulting_ids.extend(problem_id for problem_id in add_problem_ids if problem_id not in resulting_ids)
+            if not resulting_ids:
+                raise AppError(422, 4022, "请求参数校验失败", "assignment must contain at least one problem")
+            if len(resulting_ids) > 50:
+                raise AppError(422, 4022, "请求参数校验失败", "assignment cannot contain more than 50 problems")
+            if remove_problem_ids:
+                answered = await connection.fetchval(
+                    """
+                    SELECT COUNT(*)
+                    FROM submission_answers
+                    WHERE tenant_id = $1 AND submission_id IN (
+                        SELECT id FROM submissions WHERE tenant_id = $1 AND assignment_id = $2
+                    ) AND problem_id = ANY($3::uuid[])
+                    """,
+                    user.tenant_id,
+                    normalized_assignment_id,
+                    remove_problem_ids,
+                )
+                if int(answered or 0):
+                    raise AppError(409, 4005, "该题目已有学生提交，不可移除")
+
+            if class_ids is not None:
+                class_rows = await connection.fetch(
+                    """
+                    SELECT id FROM classes
+                    WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND NOT is_deleted
+                    """,
+                    user.tenant_id,
+                    class_ids,
+                )
+                if {str(row["id"]) for row in class_rows} != set(class_ids):
+                    raise AppError(404, 4004, "班级不存在")
+                await connection.execute(
+                    "DELETE FROM assignment_classes WHERE tenant_id = $1 AND assignment_id = $2",
+                    user.tenant_id,
+                    normalized_assignment_id,
+                )
+                for class_id in class_ids:
+                    await connection.execute(
+                        """
+                        INSERT INTO assignment_classes (tenant_id, assignment_id, class_id)
+                        VALUES ($1, $2, $3)
+                        """,
+                        user.tenant_id,
+                        normalized_assignment_id,
+                        class_id,
+                    )
+
+            if add_problem_ids or remove_problem_ids:
+                await connection.execute(
+                    "DELETE FROM assignment_problems WHERE tenant_id = $1 AND assignment_id = $2",
+                    user.tenant_id,
+                    normalized_assignment_id,
+                )
+                for position, problem_id in enumerate(resulting_ids, 1):
+                    await connection.execute(
+                        """
+                        INSERT INTO assignment_problems (tenant_id, assignment_id, problem_id, position)
+                        VALUES ($1, $2, $3, $4)
+                        """,
+                        user.tenant_id,
+                        normalized_assignment_id,
+                        problem_id,
+                        position,
+                    )
+
+            title = payload.get("title", assignment["title"])
+            due_date = payload["due_date"] if "due_date" in payload else assignment["due_date"]
+            row = await connection.fetchrow(
+                """
+                UPDATE assignments
+                SET title = $3, due_date = $4
+                WHERE tenant_id = $1 AND id = $2
+                RETURNING title, due_date
+                """,
+                user.tenant_id,
+                normalized_assignment_id,
+                title,
+                due_date,
+            )
+        return {
+            "assignment_id": normalized_assignment_id,
+            "title": row["title"],
+            "due_date": row["due_date"].isoformat() if row["due_date"] else None,
+            "problem_count": len(resulting_ids),
+        }
 
     async def _visible_assignment(
         self,
@@ -1034,6 +1190,49 @@ class PostgresIdentityProblemRepository:
             "summary": self._summary(results),
         }
         return self._public_submission(submission_data)
+
+    async def submission_event_snapshot(self, ticket: Ticket) -> JsonDict:
+        async with self._connection(ticket.tenant_id, ticket.role, ticket.user_id) as connection:
+            submission = await connection.fetchrow(
+                """
+                SELECT id, status, updated_at
+                FROM submissions
+                WHERE tenant_id = $1 AND id = $2
+                """,
+                ticket.tenant_id,
+                ticket.submission_id,
+            )
+            if submission is None:
+                raise AppError(404, 4004, "提交记录不存在")
+            rows = await connection.fetch(
+                """
+                SELECT *
+                FROM (
+                    SELECT DISTINCT ON (problem_id)
+                           problem_id, is_correct, routed_to_human
+                    FROM grading_results
+                    WHERE tenant_id = $1 AND submission_id = $2
+                    ORDER BY problem_id, attempt_number DESC
+                ) latest
+                ORDER BY problem_id
+                """,
+                ticket.tenant_id,
+                ticket.submission_id,
+            )
+        results = [
+            {
+                "problem_id": str(row["problem_id"]),
+                "is_correct": row["is_correct"],
+                "routed_to_human": row["routed_to_human"],
+            }
+            for row in rows
+        ]
+        return {
+            "submission_id": str(submission["id"]),
+            "status": submission["status"],
+            "last_updated_at": submission["updated_at"].isoformat(),
+            "summary": self._summary(results),
+        }
 
     def _public_review(self, row: Mapping[str, Any]) -> JsonDict:
         return {

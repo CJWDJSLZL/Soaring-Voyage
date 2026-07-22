@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
@@ -12,7 +13,6 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
-from app.config import settings
 from app.core.errors import AppError, envelope, utcnow
 from app.core.security import create_access_token, hash_password, verify_password
 from app.domain.models import Ticket, User
@@ -65,6 +65,30 @@ def sse_event_stream(
             time.sleep(poll_seconds)
         yield ": heartbeat\n\n"
         heartbeats += 1
+
+
+async def postgres_sse_event_stream(
+    repository: IdentityProblemRepository,
+    ticket: Ticket,
+    *,
+    follow: bool,
+    poll_seconds: float = 15.0,
+) -> AsyncIterator[str]:
+    cursor = 0
+    last_updated_at: str | None = None
+    while True:
+        snapshot = await repository.submission_event_snapshot(ticket)
+        if snapshot["last_updated_at"] != last_updated_at:
+            last_updated_at = snapshot["last_updated_at"]
+            cursor += 1
+            yield f"id: {cursor}\nevent: grading_update\ndata: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
+            if not follow:
+                return
+        if not follow:
+            yield ": heartbeat\n\n"
+            return
+        await asyncio.sleep(poll_seconds)
+        yield ": heartbeat\n\n"
 
 
 def page(items: list[dict], page_number: int, page_size: int) -> dict:
@@ -234,23 +258,28 @@ async def logout(
 
 
 @router.post("/auth/sse-ticket")
-def sse_ticket(
+async def sse_ticket(
     payload: TicketRequest,
     request: Request,
     user: User = Depends(current_user),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
-    get_visible_submission(store, payload.submission_id, user)
+    if request.app.state.settings.persistence_backend == "postgres":
+        await repository.submission_detail(user, payload.submission_id)
+    else:
+        get_visible_submission(store, payload.submission_id, user)
     store.purge_expired_tickets()
     value = secrets.token_urlsafe(32)
+    configured = request.app.state.settings
     store.tickets[value] = Ticket(
         user.user_id,
         user.tenant_id,
         payload.submission_id,
         user.role,
-        utcnow() + timedelta(seconds=settings.sse_ticket_ttl_seconds),
+        utcnow() + timedelta(seconds=configured.sse_ticket_ttl_seconds),
     )
-    return envelope(request, {"ticket": value, "expires_in": settings.sse_ticket_ttl_seconds})
+    return envelope(request, {"ticket": value, "expires_in": configured.sse_ticket_ttl_seconds})
 
 
 @router.post("/problems/", status_code=201)
@@ -337,15 +366,18 @@ async def assignment_detail(
 
 
 @router.patch("/assignments/{assignment_id}")
-def patch_assignment(
+async def patch_assignment(
     assignment_id: str,
     payload: AssignmentPatch,
     request: Request,
     user: User = Depends(require_roles("teacher", "admin", "sysadmin")),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
     if request.app.state.settings.persistence_backend == "postgres":
-        raise AppError(503, 5003, "该工作流尚未迁移到 PostgreSQL", "作业修改将在后续提交/复核纵切中迁移")
+        validate_future_due_date(payload.due_date if "due_date" in payload.model_fields_set else None)
+        data = await repository.patch_assignment(user, assignment_id, payload.model_dump(exclude_unset=True))
+        return envelope(request, data)
     assignment = get_assignment(store, assignment_id)
     if not can_access_assignment(user, assignment):
         raise AppError(404, 4004, "作业不存在")
@@ -849,16 +881,24 @@ async def review_override(
 
 
 @router.get("/submissions/{submission_id}/events")
-def submission_events(
+async def submission_events(
     submission_id: str,
+    request: Request,
     sse_ticket: str,
     follow: bool = True,
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
     store.purge_expired_tickets()
     ticket = store.tickets.pop(sse_ticket, None)
     if ticket is None or ticket.expires_at <= utcnow() or ticket.submission_id != submission_id:
         raise AppError(401, 4001, "SSE 票据无效或已过期")
+    if request.app.state.settings.persistence_backend == "postgres":
+        return StreamingResponse(
+            postgres_sse_event_stream(repository, ticket, follow=follow),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
     submission = store.submissions.get(submission_id)
     if submission is None or submission["tenant_id"] != ticket.tenant_id:
         raise AppError(404, 4004, "提交记录不存在")
