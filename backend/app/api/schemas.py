@@ -58,6 +58,10 @@ class AdminResetPasswordRequest(BaseModel):
     new_password: str = Field(min_length=6, max_length=128)
 
 
+class AdminUserStatusRequest(BaseModel):
+    is_active: bool
+
+
 class HarnessRunRequest(BaseModel):
     use_mock: bool = True
     sample_rate: float = Field(default=1.0, ge=0.01, le=1.0)

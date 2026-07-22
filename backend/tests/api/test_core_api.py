@@ -478,3 +478,37 @@ def test_admin_bulk_create_students_from_csv(client: TestClient):
     detail = client.get(f"/api/v1/assignments/{assignment_id}", headers=auth(token))
     assert detail.status_code == 200
     assert detail.json()["data"]["assignment_id"] == assignment_id
+
+
+def test_admin_suspends_and_reactivates_student_account(client: TestClient):
+    admin = login(client, "admin")
+    student = login(client, "student")
+
+    suspended = client.patch(
+        "/api/v1/admin/users/user-student/status",
+        headers=auth(admin),
+        json={"is_active": False},
+    )
+    assert suspended.status_code == 200, suspended.text
+    assert suspended.json()["data"]["is_active"] is False
+
+    relogin = client.post("/api/v1/auth/login", json={"username": "student", "password": "Test@1234"})
+    assert relogin.status_code == 401
+    old_token_denied = client.get("/api/v1/assignments/", headers=auth(student))
+    assert old_token_denied.status_code == 401
+
+    activated = client.patch(
+        "/api/v1/admin/users/user-student/status",
+        headers=auth(admin),
+        json={"is_active": True},
+    )
+    assert activated.status_code == 200, activated.text
+    assert activated.json()["data"]["is_active"] is True
+    assert login(client, "student")
+
+    self_suspend = client.patch(
+        "/api/v1/admin/users/user-admin/status",
+        headers=auth(admin),
+        json={"is_active": False},
+    )
+    assert self_suspend.status_code == 409

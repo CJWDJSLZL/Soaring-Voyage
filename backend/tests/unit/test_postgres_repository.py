@@ -594,3 +594,44 @@ async def test_assignment_export_returns_problem_stats_and_student_rows() -> Non
     sql = connection.fetch.await_args.args[0]
     assert "DISTINCT ON (gr.submission_id, gr.problem_id)" in sql
     assert "assignment_problems" in sql
+
+
+@pytest.mark.asyncio
+async def test_update_user_status_toggles_soft_delete_token_and_audit() -> None:
+    connection = AsyncMock()
+    target_id = UUID("44444444-4444-4444-8444-444444444444")
+    connection.fetchrow.return_value = {
+        "id": target_id,
+        "username": "student",
+        "display_name": "Student",
+        "role": "student",
+        "is_deleted": True,
+    }
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    admin = PostgresIdentityProblemRepository.user_from_row(user_row(role="admin"))
+
+    result = await repository.update_user_status(admin, str(target_id), False)
+
+    assert result["is_active"] is False
+    update_sql, tenant_arg, target_arg, deleted_arg = connection.fetchrow.await_args.args
+    assert "token_version = token_version + 1" in update_sql
+    assert "SET is_deleted = $3" in update_sql
+    assert (tenant_arg, target_arg, deleted_arg) == (TENANT, str(target_id), True)
+    audit_sql, _tenant, _operator, action, resource_id, detail = connection.execute.await_args.args
+    assert "audit_logs" in audit_sql
+    assert action == "USER_SUSPENDED"
+    assert resource_id == str(target_id)
+    assert '"is_active": false' in detail
+
+
+@pytest.mark.asyncio
+async def test_update_user_status_rejects_self_suspend() -> None:
+    connection = AsyncMock()
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    admin = PostgresIdentityProblemRepository.user_from_row(user_row(role="admin"))
+
+    with pytest.raises(AppError) as exc:
+        await repository.update_user_status(admin, USER_ID, False)
+
+    assert exc.value.status_code == 409
+    connection.fetchrow.assert_not_awaited()

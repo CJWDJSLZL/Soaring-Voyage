@@ -2341,6 +2341,44 @@ class PostgresIdentityProblemRepository:
             "force_change_on_next_login": True,
         }
 
+    async def update_user_status(self, user: User, target_user_id: str, is_active: bool) -> JsonDict:
+        normalized_user_id = self._uuid_text(target_user_id, "user_id")
+        if normalized_user_id == user.user_id and not is_active:
+            raise AppError(409, 4005, "不能停用当前登录账户")
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE users
+                SET is_deleted = $3,
+                    token_version = token_version + 1
+                WHERE tenant_id = $1 AND id = $2
+                RETURNING id, username, display_name, role, is_deleted
+                """,
+                user.tenant_id,
+                normalized_user_id,
+                not is_active,
+            )
+            if row is None:
+                raise AppError(404, 4004, "用户不存在")
+            await connection.execute(
+                """
+                INSERT INTO audit_logs (tenant_id, operator_id, action, resource_type, resource_id, detail, result)
+                VALUES ($1, $2, $3, 'user', $4, $5::jsonb, 'success')
+                """,
+                user.tenant_id,
+                user.user_id,
+                "USER_ACTIVATED" if is_active else "USER_SUSPENDED",
+                normalized_user_id,
+                json.dumps({"is_active": is_active}, ensure_ascii=False),
+            )
+        return {
+            "user_id": str(row["id"]),
+            "username": row["username"],
+            "display_name": row["display_name"],
+            "role": row["role"],
+            "is_active": not bool(row["is_deleted"]),
+        }
+
     async def run_harness(self, user: User, payload: dict[str, Any], report: dict[str, Any]) -> JsonDict:
         metrics = report["metrics"]
         failures = list(report["failures"])

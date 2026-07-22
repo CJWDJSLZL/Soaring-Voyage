@@ -30,6 +30,7 @@ from app.imports import parse_problem_import, parse_student_import
 from .dependencies import current_user, get_identity_repository, get_llm_grader, get_store, require_roles
 from .schemas import (
     AdminResetPasswordRequest,
+    AdminUserStatusRequest,
     AssignmentCreate,
     AssignmentPatch,
     ChangePasswordRequest,
@@ -1062,6 +1063,17 @@ async def reset_user_password(
         user, user_id, hash_password(payload.new_password, request.app.state.settings)
     )
     return envelope(request, data)
+
+
+@router.patch("/admin/users/{user_id}/status")
+async def update_user_status(
+    user_id: str,
+    payload: AdminUserStatusRequest,
+    request: Request,
+    user: User = Depends(require_roles("admin", "sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    return envelope(request, await repository.update_user_status(user, user_id, payload.is_active))
 
 
 @router.get("/admin/stats/overview")

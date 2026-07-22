@@ -48,6 +48,7 @@ class InMemoryRepository:
         self.events: dict[str, list[JsonDict]] = {}
         self.harness_runs: dict[str, JsonDict] = {}
         self.jobs: dict[str, JsonDict] = {}
+        self.disabled_user_ids: set[str] = set()
 
     def user_by_id(self, user_id: str) -> User | None:
         return next((user for user in self.users.values() if user.user_id == user_id), None)
@@ -78,11 +79,14 @@ class InMemoryRepository:
         )
 
     async def identity_by_username(self, username: str) -> User | None:
-        return self.users.get(username)
+        user = self.users.get(username)
+        if user is None or user.user_id in self.disabled_user_ids:
+            return None
+        return user
 
     async def identity_by_id(self, user_id: str, tenant_id: str, role: str) -> User | None:
         user = self.user_by_id(user_id)
-        if user is None or user.tenant_id != tenant_id or user.role != role:
+        if user is None or user.tenant_id != tenant_id or user.role != role or user.user_id in self.disabled_user_ids:
             return None
         return user
 
@@ -886,6 +890,27 @@ class InMemoryRepository:
             "username": target.username,
             "display_name": target.display_name,
             "force_change_on_next_login": True,
+        }
+
+    async def update_user_status(self, user: User, target_user_id: str, is_active: bool) -> JsonDict:
+        from app.core.errors import AppError
+
+        target = self.user_by_id(target_user_id)
+        if target is None or target.tenant_id != user.tenant_id:
+            raise AppError(404, 4004, "用户不存在")
+        if target.user_id == user.user_id and not is_active:
+            raise AppError(409, 4005, "不能停用当前登录账户")
+        if is_active:
+            self.disabled_user_ids.discard(target.user_id)
+        else:
+            self.disabled_user_ids.add(target.user_id)
+        target.token_version += 1
+        return {
+            "user_id": target.user_id,
+            "username": target.username,
+            "display_name": target.display_name,
+            "role": target.role,
+            "is_active": is_active,
         }
 
     async def run_harness(self, user: User, payload: dict[str, Any], report: dict[str, Any]) -> JsonDict:
