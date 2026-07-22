@@ -36,6 +36,26 @@ def service_health(status: str, *, latency_ms: int | None = None, backend: str |
     return payload
 
 
+async def pending_hitl_count(request: Request, pool: asyncpg.Pool | None) -> int:
+    store = request.app.state.store
+    if store is not None:
+        return sum(review["status"] == "pending" for review in store.reviews.values())
+    if pool is None:
+        return 0
+    try:
+        async with pool.acquire() as connection:
+            count = await connection.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM human_review_queue
+                WHERE status = 'pending'
+                """
+            )
+    except Exception:
+        return 0
+    return int(count or 0)
+
+
 def create_redis_client(redis_url: str) -> Redis:
     return Redis.from_url(redis_url, decode_responses=True)
 
@@ -208,7 +228,7 @@ def create_app(
             "environment": configured.app_env,
             "uptime_seconds": round(monotonic() - request.app.state.started_at),
             "services": services,
-            "grading": {"active_requests": 0, "pending_hitl_count": 0},
+            "grading": {"active_requests": 0, "pending_hitl_count": await pending_hitl_count(request, pool)},
         }
         return JSONResponse(status_code=status_code, content=body)
 

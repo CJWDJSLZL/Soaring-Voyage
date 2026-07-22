@@ -61,6 +61,25 @@ def test_health_cors_trusted_host_and_token_detail() -> None:
     assert "detail" not in invalid.json()
 
 
+def test_health_reports_pending_human_review_count() -> None:
+    app.state.store.reset()
+    client = TestClient(app)
+    teacher = login(client, "teacher")
+    student = login(client, "student")
+    problem_id, assignment_id = make_problem_and_assignment(client, teacher)
+    submitted = client.post(
+        "/api/v1/submissions/",
+        headers=auth(student),
+        json={"assignment_id": assignment_id, "answers": [{"problem_id": problem_id, "answer_text": "uncertain:0"}]},
+    )
+    assert submitted.status_code == 201, submitted.text
+
+    health = client.get("/health")
+
+    assert health.status_code == 200
+    assert health.json()["grading"]["pending_hitl_count"] == 1
+
+
 def test_assignment_patch_validates_tenant_due_count_and_classes() -> None:
     app.state.store.reset()
     client = TestClient(app)

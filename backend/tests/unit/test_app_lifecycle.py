@@ -99,10 +99,11 @@ def test_postgres_pool_repository_health_and_shutdown_lifecycle() -> None:
 
     pool_factory.assert_awaited_once_with("postgresql:///app")
     pool.close.assert_awaited_once_with()
-    connection.fetchval.assert_awaited_with("SELECT 1")
+    assert connection.fetchval.await_args_list[0].args == ("SELECT 1",)
     assert response.status_code == 200
     body = response.json()
     assert body["status"] == "degraded"
+    assert body["grading"] == {"active_requests": 0, "pending_hitl_count": 0}
     assert service(body, "repository")["backend"] == "hybrid-postgres-identity-problems-assignments"
     assert service(body, "database")["status"] == "ok"
     assert service(body, "database")["latency_ms"] >= 0
@@ -145,7 +146,7 @@ def test_redis_ticket_repository_health_and_shutdown_lifecycle() -> None:
 
 def test_production_lifecycle_uses_external_adapters_without_memory_store() -> None:
     connection = AsyncMock()
-    connection.fetchval.return_value = 1
+    connection.fetchval.side_effect = [1, 2]
     pool = MagicMock()
     pool.acquire.return_value = AsyncContext(connection)
     pool.close = AsyncMock()
@@ -181,6 +182,7 @@ def test_production_lifecycle_uses_external_adapters_without_memory_store() -> N
     body = response.json()
     assert body["environment"] == "production"
     assert service(body, "database")["status"] == "ok"
+    assert body["grading"] == {"active_requests": 0, "pending_hitl_count": 2}
     assert service(body, "redis")["status"] == "ok"
     assert service(body, "qdrant") == {"status": "ok", "latency_ms": None, "backend": "qdrant-configured"}
     pool.close.assert_awaited_once_with()
