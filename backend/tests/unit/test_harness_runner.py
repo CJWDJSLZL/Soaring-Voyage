@@ -3,8 +3,22 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+from app.grading import GradeRequest, GradingEngine, LLMVerdict
 from app.harness.dataset import generate_cases, write_dataset
 from app.harness.runner import HarnessRunner, compute_metrics, load_cases, select_cases
+
+
+class FakeLLMGrader:
+    is_enabled = True
+
+    def __init__(self) -> None:
+        self.engine = GradingEngine()
+        self.requests: list[GradeRequest] = []
+
+    async def verdict(self, request: GradeRequest) -> LLMVerdict:
+        self.requests.append(request)
+        return LLMVerdict(is_correct=self.engine.grade(request).is_correct, confidence=0.99)
 
 
 def test_generator_is_deterministic_and_exactly_180(tmp_path: Path) -> None:
@@ -66,3 +80,25 @@ def test_runner_applies_requested_case_selection() -> None:
     assert report.metrics.total == 30
     assert report.metrics.coverage == 1.0
     assert report.metrics.accuracy >= 0.94
+
+
+@pytest.mark.asyncio
+async def test_real_runner_uses_configured_llm_grader_on_selected_cases() -> None:
+    grader = FakeLLMGrader()
+    report = await HarnessRunner(use_mock=False).run_async(
+        generate_cases(),
+        sample_rate=0.5,
+        grade_levels=[1],
+        llm_grader=grader,
+    )
+
+    assert report.metrics.total == 30
+    assert len(grader.requests) == 30
+    assert report.metrics.coverage == 1.0
+    assert report.metrics.accuracy >= 0.94
+
+
+@pytest.mark.asyncio
+async def test_real_runner_requires_configured_llm_grader() -> None:
+    with pytest.raises(RuntimeError, match="configured LLM grader"):
+        await HarnessRunner(use_mock=False).run_async(generate_cases(), sample_rate=0.01)

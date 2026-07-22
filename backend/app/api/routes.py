@@ -1092,18 +1092,18 @@ async def run_harness(
     request: Request,
     user: User = Depends(require_roles("sysadmin")),
     repository: IdentityProblemRepository = Depends(get_identity_repository),
+    llm_grader: DeepSeekGradingClient = Depends(get_llm_grader),
 ):
-    if not payload.use_mock:
-        raise AppError(503, 5002, "LLM 服务不可用", "真实 LLM Harness 仍需接入异步抽样执行器")
+    if not payload.use_mock and not llm_grader.is_enabled:
+        raise AppError(503, 5002, "LLM 服务不可用", "请先配置 LLM 再运行真实 Harness")
     report = (
-        HarnessRunner(use_mock=True)
-        .run(
+        await HarnessRunner(use_mock=payload.use_mock).run_async(
             HARNESS_DATASET,
             sample_rate=payload.sample_rate,
             grade_levels=payload.grade_levels,
+            llm_grader=llm_grader,
         )
-        .as_dict()
-    )
+    ).as_dict()
     return envelope(request, await repository.run_harness(user, payload.model_dump(), report))
 
 

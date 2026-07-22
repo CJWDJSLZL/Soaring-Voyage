@@ -8,9 +8,16 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-from app.grading import GradeRequest, GradingEngine
+from app.grading import GradeRequest, GradingEngine, LLMUnavailableError, LLMVerdict
+
+
+class LLMHarnessGrader(Protocol):
+    @property
+    def is_enabled(self) -> bool: ...
+
+    async def verdict(self, request: GradeRequest) -> LLMVerdict | None: ...
 
 
 @dataclass(frozen=True)
@@ -100,7 +107,11 @@ class HarnessRunner:
         # integrated here without changing dataset or metrics contracts.
         if not self.use_mock:
             raise RuntimeError("real LLM runner is not configured; pass --mock")
-        request = GradeRequest(
+        return self.engine.grade(self._request_from_case(case)).is_correct
+
+    @staticmethod
+    def _request_from_case(case: dict[str, Any]) -> GradeRequest:
+        return GradeRequest(
             question=case["question"],
             reference_answer=case["reference_answer"],
             student_answer=case["student_answer"],
@@ -108,7 +119,16 @@ class HarnessRunner:
             grade=case["grade"],
             hint_level=case.get("hint_level", 0),
         )
-        return self.engine.grade(request).is_correct
+
+    async def _predict_with_llm(self, case: dict[str, Any], llm_grader: LLMHarnessGrader) -> bool | None:
+        request = self._request_from_case(case)
+        try:
+            verdict = await llm_grader.verdict(request)
+        except (LLMUnavailableError, ValueError):
+            return None
+        if verdict is None:
+            return None
+        return self.engine.grade(request, verdict).is_correct
 
     def run(
         self,
@@ -120,6 +140,29 @@ class HarnessRunner:
         cases = load_cases(source) if isinstance(source, (str, Path)) else list(source)
         cases = select_cases(cases, sample_rate=sample_rate, grade_levels=grade_levels)
         predictions = [self._predict(case) for case in cases]
+        expected = [bool(case["expected_correct"]) for case in cases]
+        failures = tuple(
+            case["id"]
+            for case, prediction, truth in zip(cases, predictions, expected, strict=True)
+            if prediction != truth
+        )
+        return HarnessReport(compute_metrics(predictions, expected), failures)
+
+    async def run_async(
+        self,
+        source: str | Path | Iterable[dict[str, Any]],
+        *,
+        sample_rate: float = 1.0,
+        grade_levels: Iterable[int] | None = None,
+        llm_grader: LLMHarnessGrader | None = None,
+    ) -> HarnessReport:
+        if self.use_mock:
+            return self.run(source, sample_rate=sample_rate, grade_levels=grade_levels)
+        if llm_grader is None or not llm_grader.is_enabled:
+            raise RuntimeError("real LLM runner requires a configured LLM grader")
+        cases = load_cases(source) if isinstance(source, (str, Path)) else list(source)
+        cases = select_cases(cases, sample_rate=sample_rate, grade_levels=grade_levels)
+        predictions = [await self._predict_with_llm(case, llm_grader) for case in cases]
         expected = [bool(case["expected_correct"]) for case in cases]
         failures = tuple(
             case["id"]

@@ -7,8 +7,19 @@ from datetime import UTC, datetime, timedelta
 import jwt
 import pytest
 from app.config import settings
+from app.grading import GradeRequest, GradingEngine, LLMVerdict
 from app.main import app
 from fastapi.testclient import TestClient
+
+
+class FakeHarnessLLMGrader:
+    is_enabled = True
+
+    def __init__(self) -> None:
+        self.engine = GradingEngine()
+
+    async def verdict(self, request: GradeRequest) -> LLMVerdict:
+        return LLMVerdict(is_correct=self.engine.grade(request).is_correct, confidence=0.99)
 
 
 @pytest.fixture(autouse=True)
@@ -457,6 +468,24 @@ def test_admin_classes_stats_password_reset_and_ops_jobs(client: TestClient):
     sampled_detail = client.get(f"/api/v1/ops/harness/runs/{sampled_run_id}", headers=auth(sysadmin))
     assert sampled_detail.status_code == 200
     assert sampled_detail.json()["data"]["total_cases"] == 30
+
+    original_llm_grader = app.state.llm_grader
+    app.state.llm_grader = FakeHarnessLLMGrader()
+    try:
+        real_harness = client.post(
+            "/api/v1/ops/harness/run",
+            headers=auth(sysadmin),
+            json={"use_mock": False, "sample_rate": 0.5, "dataset": "all", "grade_levels": [1]},
+        )
+    finally:
+        app.state.llm_grader = original_llm_grader
+    assert real_harness.status_code == 202, real_harness.text
+    assert real_harness.json()["data"]["total_cases"] == 30
+    real_run_id = real_harness.json()["data"]["run_id"]
+    real_detail = client.get(f"/api/v1/ops/harness/runs/{real_run_id}", headers=auth(sysadmin))
+    assert real_detail.status_code == 200
+    assert real_detail.json()["data"]["status"] == "completed"
+    assert real_detail.json()["data"]["total_cases"] == 30
 
     rag = client.post(
         "/api/v1/ops/rag/ingest",
