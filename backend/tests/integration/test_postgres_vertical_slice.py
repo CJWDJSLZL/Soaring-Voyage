@@ -116,7 +116,7 @@ async def test_runtime_role_rls_identity_token_version_and_problem_persistence()
         problem_ids.append(problem_id)
         listed = await repository.list_catalog_problems(
             refreshed,
-            grade_level=3,
+            grade_levels=[3],
             problem_type="arithmetic",
             difficulty=None,
             keyword="integration 1 + 1",

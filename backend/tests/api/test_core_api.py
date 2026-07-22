@@ -164,6 +164,7 @@ def test_teacher_filters_problem_bank_by_tag_and_source(client: TestClient):
     teacher = login(client, "teacher")
     public_id = "public-problem"
     school_id = "school-problem"
+    grade_three_id = "grade-three-school-problem"
     base_problem = {
         "created_by": None,
         "problem_type": "arithmetic",
@@ -191,15 +192,33 @@ def test_teacher_filters_problem_bank_by_tag_and_source(client: TestClient):
         "reference_answer": "7",
         "tags": ["addition", "school"],
     }
+    app.state.store.problems[grade_three_id] = {
+        **base_problem,
+        "problem_id": grade_three_id,
+        "tenant_id": "tenant-demo",
+        "created_by": "user-teacher",
+        "problem_text": "school problem: 8 + 1 = ___",
+        "reference_answer": "9",
+        "grade_level": 3,
+        "tags": ["addition", "school"],
+    }
 
     all_addition = client.get("/api/v1/problems/?grade_level=2&tag=addition", headers=auth(teacher))
+    multi_grade = client.get(
+        "/api/v1/problems/?grade_level=2&grade_level=3&tag=school&source=school",
+        headers=auth(teacher),
+    )
     school_only = client.get("/api/v1/problems/?grade_level=2&tag=school&source=school", headers=auth(teacher))
     public_only = client.get("/api/v1/problems/?grade_level=2&tag=public&source=public", headers=auth(teacher))
+    invalid_type = client.get("/api/v1/problems/?problem_type=essay", headers=auth(teacher))
 
     assert all_addition.status_code == 200
+    assert multi_grade.status_code == 200
     assert school_only.status_code == 200
     assert public_only.status_code == 200
+    assert invalid_type.status_code == 422
     assert {item["problem_id"] for item in all_addition.json()["data"]["items"]} >= {public_id, school_id}
+    assert {item["problem_id"] for item in multi_grade.json()["data"]["items"]} >= {school_id, grade_three_id}
     assert [item["problem_id"] for item in school_only.json()["data"]["items"]] == [school_id]
     assert school_only.json()["data"]["items"][0]["source"] == "school"
     assert [item["problem_id"] for item in public_only.json()["data"]["items"]] == [public_id]

@@ -49,7 +49,7 @@ class IdentityProblemRepository(Protocol):
         self,
         user: User,
         *,
-        grade_level: int | None,
+        grade_levels: list[int],
         problem_type: str | None,
         difficulty: str | None,
         keyword: str | None,

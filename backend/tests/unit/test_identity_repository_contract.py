@@ -65,7 +65,7 @@ async def test_memory_repository_problem_contract_is_tenant_scoped_filtered_and_
 
     result = await repository.list_catalog_problems(
         teacher,
-        grade_level=3,
+        grade_levels=[3],
         problem_type="arithmetic",
         difficulty=None,
         keyword="FRACTION",

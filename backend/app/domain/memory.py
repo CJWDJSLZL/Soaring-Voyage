@@ -187,7 +187,7 @@ class InMemoryRepository:
         self,
         user: User,
         *,
-        grade_level: int | None,
+        grade_levels: list[int],
         problem_type: str | None,
         difficulty: str | None,
         keyword: str | None,
@@ -203,8 +203,9 @@ class InMemoryRepository:
             items = [item for item in items if item.get("tenant_id") is None]
         else:
             items = [item for item in items if item.get("tenant_id") in {None, user.tenant_id}]
-        if grade_level is not None:
-            items = [item for item in items if item["grade_level"] == grade_level]
+        if grade_levels:
+            expected_grade_levels = set(grade_levels)
+            items = [item for item in items if item["grade_level"] in expected_grade_levels]
         if problem_type is not None:
             items = [item for item in items if item["problem_type"] == problem_type]
         if difficulty is not None:

@@ -283,7 +283,7 @@ class PostgresIdentityProblemRepository:
         self,
         user: User,
         *,
-        grade_level: int | None,
+        grade_levels: list[int],
         problem_type: str | None,
         difficulty: str | None,
         keyword: str | None,
@@ -300,11 +300,10 @@ class PostgresIdentityProblemRepository:
             where.append("tenant_id IS NULL")
         else:
             where.append("(tenant_id = $1 OR tenant_id IS NULL)")
-        for column, value in (
-            ("grade_level", grade_level),
-            ("problem_type", problem_type),
-            ("difficulty", difficulty),
-        ):
+        if grade_levels:
+            arguments.append(grade_levels)
+            where.append(f"grade_level = ANY(${len(arguments)}::int[])")
+        for column, value in (("problem_type", problem_type), ("difficulty", difficulty)):
             if value is not None:
                 arguments.append(value)
                 where.append(f"{column} = ${len(arguments)}")

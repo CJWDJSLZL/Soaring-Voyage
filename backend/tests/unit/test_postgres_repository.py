@@ -268,7 +268,7 @@ async def test_problem_insert_and_list_are_tenant_scoped_and_deterministically_o
 
     result = await repository.list_catalog_problems(
         user,
-        grade_level=3,
+        grade_levels=[3],
         problem_type="arithmetic",
         difficulty="easy",
         keyword="1+",
@@ -280,6 +280,7 @@ async def test_problem_insert_and_list_are_tenant_scoped_and_deterministically_o
     list_sql = connection.fetch.await_args.args[0]
     count_sql = connection.fetchval.await_args_list[1].args[0]
     assert "(tenant_id = $1 OR tenant_id IS NULL)" in list_sql
+    assert "grade_level = ANY" in list_sql
     assert "tags @>" in list_sql
     assert "ORDER BY created_at DESC, id DESC" in list_sql
     assert "(tenant_id = $1 OR tenant_id IS NULL)" in count_sql

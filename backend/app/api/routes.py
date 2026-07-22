@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator, Iterable, Iterator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, Response, UploadFile
@@ -373,9 +373,9 @@ async def problem_import_template(
 @router.get("/problems/")
 async def list_problems(
     request: Request,
-    grade_level: int | None = Query(None, ge=1, le=6),
-    problem_type: str | None = None,
-    difficulty: str | None = None,
+    grade_level: list[Annotated[int, Query(ge=1, le=6)]] = Query(default_factory=list),
+    problem_type: Literal["arithmetic", "fill_in_blank", "multiple_choice"] | None = None,
+    difficulty: Literal["easy", "medium", "hard"] | None = None,
     tag: list[str] = Query(default_factory=list),
     source: Literal["public", "school", "all"] = "all",
     keyword: str | None = None,
@@ -386,7 +386,7 @@ async def list_problems(
 ):
     data = await repository.list_catalog_problems(
         user,
-        grade_level=grade_level,
+        grade_levels=grade_level,
         problem_type=problem_type,
         difficulty=difficulty,
         keyword=keyword,
