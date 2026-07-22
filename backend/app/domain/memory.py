@@ -44,6 +44,8 @@ class InMemoryRepository:
         self.knowledge_records: dict[str, JsonDict] = {}
         self.tickets: dict[str, Ticket] = {}
         self.events: dict[str, list[JsonDict]] = {}
+        self.harness_runs: dict[str, JsonDict] = {}
+        self.jobs: dict[str, JsonDict] = {}
 
     def user_by_id(self, user_id: str) -> User | None:
         return next((user for user in self.users.values() if user.user_id == user_id), None)
@@ -284,3 +286,160 @@ class InMemoryRepository:
             mine = self.submission_for(user.user_id, assignment_id)
             data["my_submission"] = {"submission_id": mine["submission_id"], "status": mine["status"]} if mine else None
         return data
+
+    async def create_class(self, user: User, payload: dict[str, Any]) -> JsonDict:
+        from app.core.errors import AppError
+
+        teacher = self.user_by_id(payload["teacher_id"])
+        if teacher is None or teacher.tenant_id != user.tenant_id or teacher.role != "teacher":
+            raise AppError(404, 4004, "教师不存在")
+        class_id = str(uuid4())
+        created_at = utcnow().isoformat()
+        self.classes[class_id] = {
+            "class_id": class_id,
+            "tenant_id": user.tenant_id,
+            "class_name": payload["name"],
+            "grade_level": payload["grade_level"],
+            "teacher_id": payload["teacher_id"],
+            "academic_year": payload["academic_year"],
+            "created_at": created_at,
+        }
+        if class_id not in teacher.class_ids:
+            teacher.class_ids.append(class_id)
+        return {
+            "class_id": class_id,
+            "name": payload["name"],
+            "grade_level": payload["grade_level"],
+            "teacher_id": payload["teacher_id"],
+            "academic_year": payload["academic_year"],
+            "created_at": created_at,
+        }
+
+    async def admin_stats_overview(self, user: User) -> JsonDict:
+        tenant_classes = [item for item in self.classes.values() if item["tenant_id"] == user.tenant_id]
+        tenant_submissions = [item for item in self.submissions.values() if item["tenant_id"] == user.tenant_id]
+        latest_results = [result for submission in tenant_submissions for result in submission["results"]]
+        human_review_count = sum(result.get("grading_source") == "human_override" for result in latest_results)
+        rule_fallback_count = sum(result.get("grading_source") == "rule_fallback" for result in latest_results)
+        correct = sum(result.get("is_correct") is True for result in latest_results)
+        reviewed = [review for review in self.reviews.values() if review["tenant_id"] == user.tenant_id]
+        return {
+            "tenant_name": user.tenant_id,
+            "active_school_year": "development",
+            "users": {
+                "total_students": sum(
+                    item.tenant_id == user.tenant_id and item.role == "student" for item in self.users.values()
+                ),
+                "total_teachers": sum(
+                    item.tenant_id == user.tenant_id and item.role == "teacher" for item in self.users.values()
+                ),
+                "total_classes": len(tenant_classes),
+                "active_students_today": 0,
+                "active_teachers_today": 0,
+            },
+            "submissions": {
+                "total_all_time": len(tenant_submissions),
+                "today": len(tenant_submissions),
+                "this_week": len(tenant_submissions),
+                "this_month": len(tenant_submissions),
+            },
+            "grading": {
+                "ai_graded_count": len(latest_results) - human_review_count,
+                "human_review_count": human_review_count or len(reviewed),
+                "human_review_rate": round((human_review_count or len(reviewed)) / len(latest_results), 3)
+                if latest_results
+                else 0.0,
+                "average_accuracy": round(correct / len(latest_results), 3) if latest_results else 0.0,
+                "rule_fallback_rate": round(rule_fallback_count / len(latest_results), 3) if latest_results else 0.0,
+            },
+            "performance": {"avg_grading_latency_ms": 0, "p95_grading_latency_ms": 0},
+        }
+
+    async def reset_user_password(self, user: User, target_user_id: str, password_hash: bytes) -> JsonDict:
+        from app.core.errors import AppError
+
+        target = self.user_by_id(target_user_id)
+        if target is None or target.tenant_id != user.tenant_id:
+            raise AppError(404, 4004, "用户不存在")
+        target.password_hash = password_hash
+        target.token_version += 1
+        return {
+            "user_id": target.user_id,
+            "username": target.username,
+            "display_name": target.display_name,
+            "force_change_on_next_login": True,
+        }
+
+    async def run_harness(self, user: User, payload: dict[str, Any], report: dict[str, Any]) -> JsonDict:
+        run_id = str(uuid4())
+        metrics = report["metrics"]
+        run = {
+            "run_id": run_id,
+            "status": "completed",
+            "passed": not report["failures"],
+            "prompt_version": "local",
+            "use_mock": payload["use_mock"],
+            "total_cases": metrics["total"],
+            "passed_cases": metrics["total"] - len(report["failures"]),
+            "accuracy": metrics["accuracy"],
+            "false_positive_rate": metrics["false_positive_rate"],
+            "false_negative_rate": metrics["false_negative_rate"],
+            "error_cls_accuracy": None,
+            "calibration_error": None,
+            "coverage_matrix": {},
+            "failed_cases": report["failures"],
+            "run_at": utcnow().isoformat(),
+            "duration_seconds": 0,
+            "triggered_by_user_id": user.user_id,
+        }
+        self.harness_runs[run_id] = run
+        return {
+            "run_id": run_id,
+            "status": run["status"],
+            "estimated_seconds": 0,
+            "use_mock": run["use_mock"],
+            "total_cases": run["total_cases"],
+        }
+
+    async def harness_run_detail(self, user: User, run_id: str) -> JsonDict:
+        from app.core.errors import AppError
+
+        run = self.harness_runs.get(run_id)
+        if run is None:
+            raise AppError(404, 4004, "Harness 运行记录不存在")
+        return run
+
+    async def create_rag_ingest_job(self, user: User, payload: dict[str, Any]) -> JsonDict:
+        job_id = str(uuid4())
+        now = utcnow().isoformat()
+        problem_count = sum(
+            item["tenant_id"] == user.tenant_id
+            and (not payload["grade_levels"] or item["grade_level"] in payload["grade_levels"])
+            for item in self.problems.values()
+        )
+        job = {
+            "job_id": job_id,
+            "job_type": "rag_ingest",
+            "status": "succeeded",
+            "progress": 1.0,
+            "created_at": now,
+            "updated_at": now,
+            "created_by": user.user_id,
+            "payload": payload,
+            "result": {
+                "source": payload["source"],
+                "matched_problem_count": problem_count,
+                "ingested_count": 0,
+                "qdrant_status": "not_wired",
+            },
+        }
+        self.jobs[job_id] = job
+        return {"job_id": job_id, "status": "succeeded", "matched_problem_count": problem_count}
+
+    async def job_detail(self, user: User, job_id: str) -> JsonDict:
+        from app.core.errors import AppError
+
+        job = self.jobs.get(job_id)
+        if job is None or (user.role == "admin" and job["created_by"] != user.user_id):
+            raise AppError(404, 4004, "后台任务不存在")
+        return job

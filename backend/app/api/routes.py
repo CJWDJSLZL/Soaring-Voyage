@@ -7,6 +7,7 @@ import time
 from collections.abc import AsyncIterator, Iterable, Iterator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Literal, cast
 from uuid import uuid4
 
@@ -18,21 +19,27 @@ from app.core.security import create_access_token, hash_password, verify_passwor
 from app.domain.models import Ticket, User
 from app.domain.repository import IdentityProblemRepository, Repository
 from app.grading import DeepSeekGradingClient, GradeRequest, LLMUnavailableError, LLMVerdict, QuestionType, route_grade
+from app.harness import HarnessRunner
 
 from .dependencies import current_user, get_identity_repository, get_llm_grader, get_store, require_roles
 from .schemas import (
+    AdminResetPasswordRequest,
     AssignmentCreate,
     AssignmentPatch,
     ChangePasswordRequest,
+    ClassCreate,
+    HarnessRunRequest,
     HintRequest,
     LoginRequest,
     ProblemCreate,
+    RagIngestRequest,
     ReviewRequest,
     SubmissionCreate,
     TicketRequest,
 )
 
 router = APIRouter()
+HARNESS_DATASET = Path(__file__).resolve().parents[2] / "harness" / "dataset" / "grading_cases.jsonl"
 
 
 def ident() -> str:
@@ -878,6 +885,88 @@ async def review_override(
             "is_training_example": payload.is_training_example,
         },
     )
+
+
+@router.post("/admin/classes/", status_code=201)
+async def create_class(
+    payload: ClassCreate,
+    request: Request,
+    user: User = Depends(require_roles("admin", "sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    return envelope(request, await repository.create_class(user, payload.model_dump()))
+
+
+@router.post("/admin/users/{user_id}/reset-password")
+async def reset_user_password(
+    user_id: str,
+    payload: AdminResetPasswordRequest,
+    request: Request,
+    user: User = Depends(require_roles("admin", "sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    if (
+        len(payload.new_password) < 8
+        or not any(character.isalpha() for character in payload.new_password)
+        or not any(character.isdigit() for character in payload.new_password)
+    ):
+        raise AppError(422, 4022, "请求参数校验失败", "Admin reset password requires letters and digits")
+    data = await repository.reset_user_password(
+        user, user_id, hash_password(payload.new_password, request.app.state.settings)
+    )
+    return envelope(request, data)
+
+
+@router.get("/admin/stats/overview")
+async def admin_stats_overview(
+    request: Request,
+    user: User = Depends(require_roles("admin", "sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    return envelope(request, await repository.admin_stats_overview(user))
+
+
+@router.post("/ops/harness/run", status_code=202)
+async def run_harness(
+    payload: HarnessRunRequest,
+    request: Request,
+    user: User = Depends(require_roles("sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    if not payload.use_mock:
+        raise AppError(503, 5002, "LLM 服务不可用", "真实 LLM Harness 仍需接入异步抽样执行器")
+    report = HarnessRunner(use_mock=True).run(HARNESS_DATASET).as_dict()
+    return envelope(request, await repository.run_harness(user, payload.model_dump(), report))
+
+
+@router.get("/ops/harness/runs/{run_id}")
+async def harness_run_detail(
+    run_id: str,
+    request: Request,
+    user: User = Depends(require_roles("sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    return envelope(request, await repository.harness_run_detail(user, run_id))
+
+
+@router.post("/ops/rag/ingest", status_code=202)
+async def rag_ingest(
+    payload: RagIngestRequest,
+    request: Request,
+    user: User = Depends(require_roles("sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    return envelope(request, await repository.create_rag_ingest_job(user, payload.model_dump()))
+
+
+@router.get("/ops/jobs/{job_id}")
+async def job_detail(
+    job_id: str,
+    request: Request,
+    user: User = Depends(require_roles("admin", "sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    return envelope(request, await repository.job_detail(user, job_id))
 
 
 @router.get("/submissions/{submission_id}/events")

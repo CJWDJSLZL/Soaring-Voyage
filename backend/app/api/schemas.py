@@ -47,6 +47,49 @@ class AssignmentPatch(BaseModel):
     remove_problem_ids: list[str] = Field(default_factory=list, max_length=50)
 
 
+class ClassCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    grade_level: int = Field(ge=1, le=6)
+    teacher_id: str = Field(min_length=1)
+    academic_year: str = Field(min_length=4, max_length=20)
+
+
+class AdminResetPasswordRequest(BaseModel):
+    new_password: str = Field(min_length=6, max_length=128)
+
+
+class HarnessRunRequest(BaseModel):
+    use_mock: bool = True
+    sample_rate: float = Field(default=1.0, ge=0.01, le=1.0)
+    dataset: str = Field(default="all", max_length=100)
+    grade_levels: list[int] = Field(default_factory=list, max_length=6)
+
+    @field_validator("grade_levels")
+    @classmethod
+    def validate_grade_levels(cls, value: list[int]) -> list[int]:
+        if any(level < 1 or level > 6 for level in value):
+            raise ValueError("grade levels must be between 1 and 6")
+        if len(value) != len(set(value)):
+            raise ValueError("grade levels must be unique")
+        return value
+
+
+class RagIngestRequest(BaseModel):
+    source: Literal["problems_table"] = "problems_table"
+    grade_levels: list[int] = Field(default_factory=list, max_length=6)
+    batch_size: int = Field(default=100, ge=1, le=1000)
+    force_reingest: bool = False
+
+    @field_validator("grade_levels")
+    @classmethod
+    def validate_grade_levels(cls, value: list[int]) -> list[int]:
+        if any(level < 1 or level > 6 for level in value):
+            raise ValueError("grade levels must be between 1 and 6")
+        if len(value) != len(set(value)):
+            raise ValueError("grade levels must be unique")
+        return value
+
+
 class Answer(BaseModel):
     problem_id: str = Field(min_length=1)
     answer_text: str = Field(max_length=500)

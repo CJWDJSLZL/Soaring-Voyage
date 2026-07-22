@@ -1381,3 +1381,291 @@ class PostgresIdentityProblemRepository:
             "notify_eta_seconds": 0,
             "is_training_example": payload["is_training_example"],
         }
+
+    async def create_class(self, user: User, payload: dict[str, Any]) -> JsonDict:
+        teacher_id = self._uuid_text(payload["teacher_id"], "teacher_id")
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            teacher = await connection.fetchrow(
+                """
+                SELECT id FROM users
+                WHERE tenant_id = $1 AND id = $2 AND role = 'teacher' AND NOT is_deleted
+                """,
+                user.tenant_id,
+                teacher_id,
+            )
+            if teacher is None:
+                raise AppError(404, 4004, "教师不存在")
+            row = await connection.fetchrow(
+                """
+                INSERT INTO classes (tenant_id, grade_level, name, teacher_id, academic_year)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id, created_at
+                """,
+                user.tenant_id,
+                payload["grade_level"],
+                payload["name"],
+                teacher_id,
+                payload["academic_year"],
+            )
+        return {
+            "class_id": str(row["id"]),
+            "name": payload["name"],
+            "grade_level": payload["grade_level"],
+            "teacher_id": teacher_id,
+            "academic_year": payload["academic_year"],
+            "created_at": row["created_at"].isoformat(),
+        }
+
+    async def admin_stats_overview(self, user: User) -> JsonDict:
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            tenant = await connection.fetchrow(
+                "SELECT name, active_school_year FROM tenants WHERE id = $1",
+                user.tenant_id,
+            )
+            user_counts = await connection.fetchrow(
+                """
+                SELECT
+                  COUNT(*) FILTER (WHERE role = 'student') AS students,
+                  COUNT(*) FILTER (WHERE role = 'teacher') AS teachers,
+                  COUNT(*) FILTER (
+                    WHERE role = 'student' AND last_login_at >= now() - interval '1 day'
+                  ) AS active_students,
+                  COUNT(*) FILTER (
+                    WHERE role = 'teacher' AND last_login_at >= now() - interval '1 day'
+                  ) AS active_teachers
+                FROM users
+                WHERE tenant_id = $1 AND NOT is_deleted
+                """,
+                user.tenant_id,
+            )
+            class_count = await connection.fetchval(
+                "SELECT COUNT(*) FROM classes WHERE tenant_id = $1 AND NOT is_deleted",
+                user.tenant_id,
+            )
+            submission_counts = await connection.fetchrow(
+                """
+                SELECT
+                  COUNT(*) AS total,
+                  COUNT(*) FILTER (WHERE submitted_at >= date_trunc('day', now())) AS today,
+                  COUNT(*) FILTER (WHERE submitted_at >= date_trunc('week', now())) AS week,
+                  COUNT(*) FILTER (WHERE submitted_at >= date_trunc('month', now())) AS month
+                FROM submissions
+                WHERE tenant_id = $1
+                """,
+                user.tenant_id,
+            )
+            grading = await connection.fetchrow(
+                """
+                WITH latest AS (
+                  SELECT DISTINCT ON (submission_id, problem_id)
+                         is_correct, source, routed_to_human
+                  FROM grading_results
+                  WHERE tenant_id = $1
+                  ORDER BY submission_id, problem_id, attempt_number DESC
+                )
+                SELECT
+                  COUNT(*) AS total,
+                  COUNT(*) FILTER (WHERE source <> 'human_override') AS ai_graded,
+                  COUNT(*) FILTER (WHERE source = 'human_override') AS human_review,
+                  COUNT(*) FILTER (WHERE source = 'rule_fallback') AS rule_fallback,
+                  COUNT(*) FILTER (WHERE is_correct IS TRUE) AS correct
+                FROM latest
+                """,
+                user.tenant_id,
+            )
+        total_results = int(grading["total"] or 0)
+        human_review_count = int(grading["human_review"] or 0)
+        rule_fallback_count = int(grading["rule_fallback"] or 0)
+        correct = int(grading["correct"] or 0)
+        return {
+            "tenant_name": tenant["name"] if tenant else user.tenant_id,
+            "active_school_year": tenant["active_school_year"] if tenant else None,
+            "users": {
+                "total_students": int(user_counts["students"] or 0),
+                "total_teachers": int(user_counts["teachers"] or 0),
+                "total_classes": int(class_count or 0),
+                "active_students_today": int(user_counts["active_students"] or 0),
+                "active_teachers_today": int(user_counts["active_teachers"] or 0),
+            },
+            "submissions": {
+                "total_all_time": int(submission_counts["total"] or 0),
+                "today": int(submission_counts["today"] or 0),
+                "this_week": int(submission_counts["week"] or 0),
+                "this_month": int(submission_counts["month"] or 0),
+            },
+            "grading": {
+                "ai_graded_count": int(grading["ai_graded"] or 0),
+                "human_review_count": human_review_count,
+                "human_review_rate": round(human_review_count / total_results, 3) if total_results else 0.0,
+                "average_accuracy": round(correct / total_results, 3) if total_results else 0.0,
+                "rule_fallback_rate": round(rule_fallback_count / total_results, 3) if total_results else 0.0,
+            },
+            "performance": {"avg_grading_latency_ms": 0, "p95_grading_latency_ms": 0},
+        }
+
+    async def reset_user_password(self, user: User, target_user_id: str, password_hash: bytes) -> JsonDict:
+        normalized_user_id = self._uuid_text(target_user_id, "user_id")
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            row = await connection.fetchrow(
+                """
+                UPDATE users
+                SET password_hash = $3,
+                    force_change_password = true,
+                    token_version = token_version + 1
+                WHERE tenant_id = $1 AND id = $2 AND NOT is_deleted
+                RETURNING id, username, display_name
+                """,
+                user.tenant_id,
+                normalized_user_id,
+                password_hash.decode("utf-8"),
+            )
+            if row is None:
+                raise AppError(404, 4004, "用户不存在")
+            await connection.execute(
+                """
+                INSERT INTO audit_logs (tenant_id, operator_id, action, resource_type, resource_id, result)
+                VALUES ($1, $2, 'reset_password', 'user', $3, 'success')
+                """,
+                user.tenant_id,
+                user.user_id,
+                normalized_user_id,
+            )
+        return {
+            "user_id": str(row["id"]),
+            "username": row["username"],
+            "display_name": row["display_name"],
+            "force_change_on_next_login": True,
+        }
+
+    async def run_harness(self, user: User, payload: dict[str, Any], report: dict[str, Any]) -> JsonDict:
+        metrics = report["metrics"]
+        failures = list(report["failures"])
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            run_id = await connection.fetchval(
+                """
+                INSERT INTO harness_runs (
+                    status, triggered_by, prompt_version, use_mock, total_cases, passed_cases,
+                    failed_cases_json, accuracy, false_positive_rate, false_negative_rate,
+                    error_cls_accuracy, calibration_error, coverage_matrix, passed,
+                    accuracy_threshold, duration_seconds
+                )
+                VALUES (
+                    'completed', 'manual', 'local', $1, $2, $3,
+                    $4::jsonb, $5, $6, $7, NULL, NULL, '{}'::jsonb, $8, 0.94, 0
+                )
+                RETURNING id
+                """,
+                payload["use_mock"],
+                metrics["total"],
+                metrics["total"] - len(failures),
+                json.dumps(failures, ensure_ascii=False),
+                metrics["accuracy"],
+                metrics["false_positive_rate"],
+                metrics["false_negative_rate"],
+                not failures,
+            )
+        return {
+            "run_id": str(run_id),
+            "status": "completed",
+            "estimated_seconds": 0,
+            "use_mock": payload["use_mock"],
+            "total_cases": metrics["total"],
+        }
+
+    async def harness_run_detail(self, user: User, run_id: str) -> JsonDict:
+        normalized_run_id = self._uuid_text(run_id, "run_id")
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT id, status, passed, prompt_version, use_mock, total_cases, passed_cases,
+                       failed_cases_json, accuracy, false_positive_rate, false_negative_rate,
+                       error_cls_accuracy, calibration_error, coverage_matrix, run_at, duration_seconds
+                FROM harness_runs
+                WHERE id = $1
+                """,
+                normalized_run_id,
+            )
+        if row is None:
+            raise AppError(404, 4004, "Harness 运行记录不存在")
+        return {
+            "run_id": str(row["id"]),
+            "status": row["status"],
+            "passed": row["passed"],
+            "prompt_version": row["prompt_version"],
+            "use_mock": row["use_mock"],
+            "total_cases": row["total_cases"],
+            "passed_cases": row["passed_cases"],
+            "accuracy": row["accuracy"],
+            "false_positive_rate": row["false_positive_rate"],
+            "false_negative_rate": row["false_negative_rate"],
+            "error_cls_accuracy": row["error_cls_accuracy"],
+            "calibration_error": row["calibration_error"],
+            "coverage_matrix": self._json_value(row["coverage_matrix"], {}),
+            "failed_cases": self._json_value(row["failed_cases_json"], []),
+            "run_at": row["run_at"].isoformat(),
+            "duration_seconds": row["duration_seconds"],
+        }
+
+    async def create_rag_ingest_job(self, user: User, payload: dict[str, Any]) -> JsonDict:
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            matched = await connection.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM problems
+                WHERE tenant_id = $1
+                  AND NOT is_deleted
+                  AND (cardinality($2::int[]) = 0 OR grade_level = ANY($2::int[]))
+                """,
+                user.tenant_id,
+                payload["grade_levels"],
+            )
+            result = {
+                "source": payload["source"],
+                "matched_problem_count": int(matched or 0),
+                "ingested_count": 0,
+                "qdrant_status": "not_wired",
+            }
+            job = await connection.fetchrow(
+                """
+                INSERT INTO jobs (tenant_id, job_type, status, payload, result, attempts, created_by)
+                VALUES ($1, 'rag_ingest', 'succeeded', $2::jsonb, $3::jsonb, 1, $4)
+                RETURNING id, status
+                """,
+                user.tenant_id,
+                json.dumps(payload, ensure_ascii=False),
+                json.dumps(result, ensure_ascii=False),
+                user.user_id,
+            )
+        return {
+            "job_id": str(job["id"]),
+            "status": job["status"],
+            "matched_problem_count": result["matched_problem_count"],
+        }
+
+    async def job_detail(self, user: User, job_id: str) -> JsonDict:
+        normalized_job_id = self._uuid_text(job_id, "job_id")
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            row = await connection.fetchrow(
+                """
+                SELECT id, job_type, status, payload, result, error_message, created_by, created_at, updated_at
+                FROM jobs
+                WHERE tenant_id = $1 AND id = $2
+                """,
+                user.tenant_id,
+                normalized_job_id,
+            )
+        if row is None or (user.role == "admin" and str(row["created_by"]) != user.user_id):
+            raise AppError(404, 4004, "后台任务不存在")
+        status = row["status"]
+        progress = 1.0 if status in {"succeeded", "failed", "cancelled"} else 0.5
+        return {
+            "job_id": str(row["id"]),
+            "job_type": row["job_type"],
+            "status": status,
+            "progress": progress,
+            "created_at": row["created_at"].isoformat(),
+            "updated_at": row["updated_at"].isoformat(),
+            "payload": self._json_value(row["payload"], {}),
+            "result": self._json_value(row["result"], None),
+            "error_message": row["error_message"],
+        }

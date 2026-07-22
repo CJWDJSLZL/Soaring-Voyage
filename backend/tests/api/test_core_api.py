@@ -219,3 +219,63 @@ def test_hint_level_increments_and_stops_after_three(client: TestClient):
     )
     assert exhausted.status_code == 409
     assert exhausted.json()["code"] == 4007
+
+
+def test_admin_classes_stats_password_reset_and_ops_jobs(client: TestClient):
+    admin = login(client, "admin")
+    sysadmin = login(client, "sysadmin")
+    student = login(client, "student")
+
+    denied = client.get("/api/v1/admin/stats/overview", headers=auth(student))
+    assert denied.status_code == 403
+
+    created = client.post(
+        "/api/v1/admin/classes/",
+        headers=auth(admin),
+        json={
+            "name": "三年级C班",
+            "grade_level": 3,
+            "teacher_id": "user-teacher",
+            "academic_year": "2026-2027",
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert created.json()["data"]["name"] == "三年级C班"
+
+    reset = client.post(
+        "/api/v1/admin/users/user-student/reset-password",
+        headers=auth(admin),
+        json={"new_password": "TempPass2026"},
+    )
+    assert reset.status_code == 200
+    assert reset.json()["data"]["force_change_on_next_login"] is True
+    assert (
+        client.post("/api/v1/auth/login", json={"username": "student", "password": "TempPass2026"}).status_code == 200
+    )
+
+    stats = client.get("/api/v1/admin/stats/overview", headers=auth(admin))
+    assert stats.status_code == 200
+    assert stats.json()["data"]["users"]["total_classes"] >= 3
+
+    harness = client.post(
+        "/api/v1/ops/harness/run",
+        headers=auth(sysadmin),
+        json={"use_mock": True, "sample_rate": 1.0, "dataset": "all", "grade_levels": [1, 2, 3]},
+    )
+    assert harness.status_code == 202
+    run_id = harness.json()["data"]["run_id"]
+    harness_detail = client.get(f"/api/v1/ops/harness/runs/{run_id}", headers=auth(sysadmin))
+    assert harness_detail.status_code == 200
+    assert harness_detail.json()["data"]["status"] == "completed"
+    assert harness_detail.json()["data"]["accuracy"] >= 0.94
+
+    rag = client.post(
+        "/api/v1/ops/rag/ingest",
+        headers=auth(sysadmin),
+        json={"source": "problems_table", "grade_levels": [3], "batch_size": 100, "force_reingest": False},
+    )
+    assert rag.status_code == 202
+    job_id = rag.json()["data"]["job_id"]
+    job = client.get(f"/api/v1/ops/jobs/{job_id}", headers=auth(sysadmin))
+    assert job.status_code == 200
+    assert job.json()["data"]["result"]["qdrant_status"] == "not_wired"
