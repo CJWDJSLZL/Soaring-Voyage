@@ -10,6 +10,7 @@ from app.core.errors import AppError
 from app.core.security import decode_access_token
 from app.domain.models import User
 from app.domain.repository import IdentityProblemRepository, Repository
+from app.grading import DeepSeekGradingClient
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -20,6 +21,10 @@ def get_store(request: Request) -> Repository:
 
 def get_identity_repository(request: Request) -> IdentityProblemRepository:
     return request.app.state.identity_repository
+
+
+def get_llm_grader(request: Request) -> DeepSeekGradingClient:
+    return request.app.state.llm_grader
 
 
 async def current_user(

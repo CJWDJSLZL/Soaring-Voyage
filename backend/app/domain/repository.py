@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, Protocol
 
@@ -62,3 +63,38 @@ class IdentityProblemRepository(Protocol):
         page_size: int,
     ) -> JsonDict: ...
     async def assignment_detail(self, user: User, assignment_id: str) -> JsonDict: ...
+    async def patch_assignment(self, user: User, assignment_id: str, payload: dict[str, Any]) -> JsonDict: ...
+    async def submit_assignment(
+        self,
+        user: User,
+        payload: dict[str, Any],
+        grade_problem: Callable[[JsonDict, str], Awaitable[JsonDict]],
+    ) -> JsonDict: ...
+    async def request_hint(
+        self,
+        user: User,
+        submission_id: str,
+        payload: dict[str, Any],
+        grade_problem: Callable[[JsonDict, str, int], Awaitable[JsonDict]],
+    ) -> JsonDict: ...
+    async def list_submissions(
+        self,
+        user: User,
+        *,
+        student_id: str | None,
+        assignment_id: str | None,
+        page_number: int,
+        page_size: int,
+    ) -> JsonDict: ...
+    async def submission_detail(self, user: User, submission_id: str) -> JsonDict: ...
+    async def submission_event_snapshot(self, ticket: Ticket) -> JsonDict: ...
+    async def list_human_reviews(
+        self,
+        user: User,
+        *,
+        status: str,
+        page_number: int,
+        page_size: int,
+    ) -> tuple[JsonDict, int]: ...
+    async def human_review_detail(self, user: User, review_id: str) -> JsonDict: ...
+    async def resolve_human_review(self, user: User, review_id: str, payload: dict[str, Any]) -> JsonDict: ...

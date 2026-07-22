@@ -18,6 +18,7 @@ from app.core.errors import AppError, trace_id
 from app.db.pool import create_pool
 from app.domain.memory import InMemoryRepository
 from app.domain.postgres import PostgresIdentityProblemRepository
+from app.grading import DeepSeekGradingClient, LLMClientConfig
 
 PoolFactory = Callable[[str], Awaitable[asyncpg.Pool]]
 
@@ -32,6 +33,7 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
         application.state.store = store
         application.state.pool = None
         application.state.identity_repository = store
+        application.state.llm_grader = DeepSeekGradingClient(LLMClientConfig.from_settings(configured))
         if configured.persistence_backend == "postgres":
             pool = await pool_factory(configured.database_url or "")
             application.state.pool = pool
@@ -44,6 +46,7 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
             pool = application.state.pool
             if pool is not None:
                 await pool.close()
+            await application.state.llm_grader.close()
 
     application = FastAPI(title="翱翔启航 API", version="1.0.0", lifespan=lifespan)
     # Preserve the established test/tooling contract that exposes the memory
@@ -53,6 +56,7 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
     application.state.store = store
     application.state.pool = None
     application.state.identity_repository = store
+    application.state.llm_grader = DeepSeekGradingClient(LLMClientConfig.from_settings(configured))
     application.add_middleware(TrustedHostMiddleware, allowed_hosts=list(configured.allowed_hosts))
     application.add_middleware(
         CORSMiddleware,
@@ -66,26 +70,7 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
     async def request_trace(request: Request, call_next: Callable[..., Awaitable[Any]]):
         supplied = request.headers.get("X-Trace-ID", "")
         request.state.trace_id = supplied if supplied.startswith("req-") else f"req-{uuid4()}"
-        path = request.url.path
-        unported_prefixes = (
-            f"{configured.api_prefix}/submissions",
-            f"{configured.api_prefix}/teacher/human-review",
-        )
-        unported_exact = {f"{configured.api_prefix}/auth/sse-ticket"}
-        if configured.persistence_backend == "postgres" and (
-            path.startswith(unported_prefixes) or path in unported_exact
-        ):
-            response = JSONResponse(
-                status_code=503,
-                content={
-                    "code": 5003,
-                    "message": "该工作流尚未迁移到 PostgreSQL",
-                    "detail": "当前 PostgreSQL 阶段仅支持认证和题库接口",
-                    "trace_id": request.state.trace_id,
-                },
-            )
-        else:
-            response = await call_next(request)
+        response = await call_next(request)
         response.headers["X-Trace-ID"] = request.state.trace_id
         return response
 
@@ -137,6 +122,7 @@ def create_app(configured: Settings, *, pool_factory: PoolFactory = create_pool)
                 "database": database_status,
                 "redis": "not-wired",
                 "qdrant": "not-wired",
+                "llm": request.app.state.llm_grader.health_status,
             },
         }
         return JSONResponse(status_code=status_code, content=body)

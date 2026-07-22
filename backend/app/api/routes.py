@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import secrets
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
@@ -12,14 +13,13 @@ from uuid import uuid4
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import StreamingResponse
 
-from app.config import settings
 from app.core.errors import AppError, envelope, utcnow
 from app.core.security import create_access_token, hash_password, verify_password
 from app.domain.models import Ticket, User
 from app.domain.repository import IdentityProblemRepository, Repository
-from app.grading import GradeRequest, LLMVerdict, QuestionType, route_grade
+from app.grading import DeepSeekGradingClient, GradeRequest, LLMUnavailableError, LLMVerdict, QuestionType, route_grade
 
-from .dependencies import current_user, get_identity_repository, get_store, require_roles
+from .dependencies import current_user, get_identity_repository, get_llm_grader, get_store, require_roles
 from .schemas import (
     AssignmentCreate,
     AssignmentPatch,
@@ -65,6 +65,30 @@ def sse_event_stream(
             time.sleep(poll_seconds)
         yield ": heartbeat\n\n"
         heartbeats += 1
+
+
+async def postgres_sse_event_stream(
+    repository: IdentityProblemRepository,
+    ticket: Ticket,
+    *,
+    follow: bool,
+    poll_seconds: float = 15.0,
+) -> AsyncIterator[str]:
+    cursor = 0
+    last_updated_at: str | None = None
+    while True:
+        snapshot = await repository.submission_event_snapshot(ticket)
+        if snapshot["last_updated_at"] != last_updated_at:
+            last_updated_at = snapshot["last_updated_at"]
+            cursor += 1
+            yield f"id: {cursor}\nevent: grading_update\ndata: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
+            if not follow:
+                return
+        if not follow:
+            yield ": heartbeat\n\n"
+            return
+        await asyncio.sleep(poll_seconds)
+        yield ": heartbeat\n\n"
 
 
 def page(items: list[dict], page_number: int, page_size: int) -> dict:
@@ -234,23 +258,28 @@ async def logout(
 
 
 @router.post("/auth/sse-ticket")
-def sse_ticket(
+async def sse_ticket(
     payload: TicketRequest,
     request: Request,
     user: User = Depends(current_user),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
-    get_visible_submission(store, payload.submission_id, user)
+    if request.app.state.settings.persistence_backend == "postgres":
+        await repository.submission_detail(user, payload.submission_id)
+    else:
+        get_visible_submission(store, payload.submission_id, user)
     store.purge_expired_tickets()
     value = secrets.token_urlsafe(32)
+    configured = request.app.state.settings
     store.tickets[value] = Ticket(
         user.user_id,
         user.tenant_id,
         payload.submission_id,
         user.role,
-        utcnow() + timedelta(seconds=settings.sse_ticket_ttl_seconds),
+        utcnow() + timedelta(seconds=configured.sse_ticket_ttl_seconds),
     )
-    return envelope(request, {"ticket": value, "expires_in": settings.sse_ticket_ttl_seconds})
+    return envelope(request, {"ticket": value, "expires_in": configured.sse_ticket_ttl_seconds})
 
 
 @router.post("/problems/", status_code=201)
@@ -337,15 +366,18 @@ async def assignment_detail(
 
 
 @router.patch("/assignments/{assignment_id}")
-def patch_assignment(
+async def patch_assignment(
     assignment_id: str,
     payload: AssignmentPatch,
     request: Request,
     user: User = Depends(require_roles("teacher", "admin", "sysadmin")),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
     if request.app.state.settings.persistence_backend == "postgres":
-        raise AppError(503, 5003, "该工作流尚未迁移到 PostgreSQL", "作业修改将在后续提交/复核纵切中迁移")
+        validate_future_due_date(payload.due_date if "due_date" in payload.model_fields_set else None)
+        data = await repository.patch_assignment(user, assignment_id, payload.model_dump(exclude_unset=True))
+        return envelope(request, data)
     assignment = get_assignment(store, assignment_id)
     if not can_access_assignment(user, assignment):
         raise AppError(404, 4004, "作业不存在")
@@ -397,7 +429,12 @@ def patch_assignment(
     )
 
 
-def grade(problem: dict, raw_answer: str, hint_level: int = 0) -> dict:
+async def grade(
+    problem: dict,
+    raw_answer: str,
+    llm_grader: DeepSeekGradingClient,
+    hint_level: int = 0,
+) -> dict:
     """Grade through the shared deterministic/LLM-routing pipeline.
 
     The ``uncertain:`` prefix is an offline development hook used to exercise the
@@ -419,14 +456,25 @@ def grade(problem: dict, raw_answer: str, hint_level: int = 0) -> dict:
         hint_level=hint_level,
         solution_steps=problem.get("solution_steps", []),
     )
-    deterministic = route_grade(grading_request)
-    routed = route_grade(
-        grading_request,
-        LLMVerdict(
+    llm_verdict: LLMVerdict | None
+    if uncertain:
+        deterministic = route_grade(grading_request)
+        llm_verdict = LLMVerdict(
             is_correct=deterministic.is_correct,
-            confidence=0.50 if uncertain else 0.98,
-        ),
-    )
+            confidence=0.50,
+        )
+    elif not llm_grader.is_enabled:
+        deterministic = route_grade(grading_request)
+        llm_verdict = LLMVerdict(
+            is_correct=deterministic.is_correct,
+            confidence=0.98,
+        )
+    else:
+        try:
+            llm_verdict = await llm_grader.verdict(grading_request)
+        except (LLMUnavailableError, ValueError):
+            llm_verdict = None
+    routed = route_grade(grading_request, llm_verdict)
     if uncertain:
         routed.confidence = 0.50
         routed.needs_review = True
@@ -494,12 +542,21 @@ def add_pending_review(store: Repository, submission: dict, result: dict, user: 
 
 
 @router.post("/submissions/", status_code=201)
-def submit(
+async def submit(
     payload: SubmissionCreate,
     request: Request,
     user: User = Depends(require_roles("student")),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+    llm_grader: DeepSeekGradingClient = Depends(get_llm_grader),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        data = await repository.submit_assignment(
+            user,
+            payload.model_dump(),
+            lambda problem, answer: grade(problem, answer, llm_grader),
+        )
+        return envelope(request, data)
     assignment = get_assignment(store, payload.assignment_id)
     if not can_access_assignment(user, assignment):
         raise AppError(403, 4003, "该作业不属于你所在的班级")
@@ -523,7 +580,7 @@ def submit(
             "problem_id": answer.problem_id,
             "sequence": assignment["problem_ids"].index(answer.problem_id) + 1,
             "problem_text": problem["problem_text"],
-            **grade(problem, answer.answer_text),
+            **await grade(problem, answer.answer_text, llm_grader),
         }
         pending += int(result["routed_to_human"])
         results.append(result)
@@ -559,7 +616,7 @@ def submit(
 
 
 @router.get("/submissions/")
-def list_submissions(
+async def list_submissions(
     request: Request,
     student_id: str | None = None,
     assignment_id: str | None = None,
@@ -567,7 +624,17 @@ def list_submissions(
     page_size: int = Query(20, ge=1, le=100),
     user: User = Depends(current_user),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        data = await repository.list_submissions(
+            user,
+            student_id=student_id,
+            assignment_id=assignment_id,
+            page_number=page_number,
+            page_size=page_size,
+        )
+        return envelope(request, data)
     if user.role == "student":
         student_id = user.user_id
     elif user.role not in {"teacher", "admin", "sysadmin"}:
@@ -589,23 +656,36 @@ def list_submissions(
 
 
 @router.get("/submissions/{submission_id}")
-def submission_detail(
+async def submission_detail(
     submission_id: str,
     request: Request,
     user: User = Depends(current_user),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        return envelope(request, await repository.submission_detail(user, submission_id))
     return envelope(request, public_submission(get_visible_submission(store, submission_id, user)))
 
 
 @router.post("/submissions/{submission_id}/hint")
-def hint(
+async def hint(
     submission_id: str,
     payload: HintRequest,
     request: Request,
     user: User = Depends(require_roles("student")),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+    llm_grader: DeepSeekGradingClient = Depends(get_llm_grader),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        data = await repository.request_hint(
+            user,
+            submission_id,
+            payload.model_dump(),
+            lambda problem, answer, hint_level: grade(problem, answer, llm_grader, hint_level),
+        )
+        return envelope(request, data)
     submission = get_visible_submission(store, submission_id, user)
     assignment = store.assignments[submission["assignment_id"]]
     if assignment["due_date"] and as_utc(assignment["due_date"]) <= utcnow():
@@ -629,7 +709,7 @@ def hint(
             review["status"] = "reviewed"
             review["resolution"] = "superseded"
             review["superseded_at"] = iso_now()
-    result.update(grade(problem, payload.new_answer.strip(), previous_hint_level + 1))
+    result.update(await grade(problem, payload.new_answer.strip(), llm_grader, previous_hint_level + 1))
     result["hint_level"] = previous_hint_level + 1
     result["attempt_number"] = previous_attempt_number + 1
     if result["show_full_solution"]:
@@ -690,7 +770,7 @@ def hint(
 
 
 @router.get("/teacher/human-review-queue")
-def review_queue(
+async def review_queue(
     request: Request,
     response: Response,
     status: Literal["pending", "reviewed", "all"] = "pending",
@@ -698,7 +778,17 @@ def review_queue(
     page_size: int = Query(20, ge=1, le=100),
     user: User = Depends(require_roles("teacher", "admin")),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        data, pending_count = await repository.list_human_reviews(
+            user,
+            status=status,
+            page_number=page_number,
+            page_size=page_size,
+        )
+        response.headers["X-Pending-Review-Count"] = str(pending_count)
+        return envelope(request, data)
     visible_reviews = []
     for review in store.reviews.values():
         submission = store.submissions[review["submission_id"]]
@@ -713,12 +803,15 @@ def review_queue(
 
 
 @router.get("/teacher/human-review/{review_id}")
-def review_detail(
+async def review_detail(
     review_id: str,
     request: Request,
     user: User = Depends(require_roles("teacher", "admin")),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        return envelope(request, await repository.human_review_detail(user, review_id))
     review = store.reviews.get(review_id)
     if not review or review["tenant_id"] != user.tenant_id:
         raise AppError(404, 4004, "审核记录不存在")
@@ -729,13 +822,16 @@ def review_detail(
 
 
 @router.post("/teacher/human-review/{review_id}")
-def review_override(
+async def review_override(
     review_id: str,
     payload: ReviewRequest,
     request: Request,
     user: User = Depends(require_roles("teacher", "admin")),
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
+    if request.app.state.settings.persistence_backend == "postgres":
+        return envelope(request, await repository.resolve_human_review(user, review_id, payload.model_dump()))
     review = store.reviews.get(review_id)
     if not review or review["status"] != "pending" or review["tenant_id"] != user.tenant_id:
         raise AppError(404, 4004, "待审核记录不存在")
@@ -785,16 +881,24 @@ def review_override(
 
 
 @router.get("/submissions/{submission_id}/events")
-def submission_events(
+async def submission_events(
     submission_id: str,
+    request: Request,
     sse_ticket: str,
     follow: bool = True,
     store: Repository = Depends(get_store),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
     store.purge_expired_tickets()
     ticket = store.tickets.pop(sse_ticket, None)
     if ticket is None or ticket.expires_at <= utcnow() or ticket.submission_id != submission_id:
         raise AppError(401, 4001, "SSE 票据无效或已过期")
+    if request.app.state.settings.persistence_backend == "postgres":
+        return StreamingResponse(
+            postgres_sse_event_stream(repository, ticket, follow=follow),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
     submission = store.submissions.get(submission_id)
     if submission is None or submission["tenant_id"] != ticket.tenant_id:
         raise AppError(404, 4004, "提交记录不存在")

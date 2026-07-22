@@ -149,8 +149,11 @@ class InMemoryRepository:
     @staticmethod
     def _assignment_status(assignment: JsonDict) -> str:
         due_date = assignment.get("due_date")
-        if due_date and datetime.fromisoformat(str(due_date)).astimezone().timestamp() <= utcnow().timestamp():
-            return "expired"
+        if due_date:
+            parsed = datetime.fromisoformat(str(due_date))
+            due = parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+            if due.astimezone(UTC) <= utcnow():
+                return "expired"
         return "active"
 
     async def create_assignment(self, user: User, payload: dict[str, Any]) -> JsonDict:

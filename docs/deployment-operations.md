@@ -286,6 +286,9 @@ vim .env
 # ── LLM API Keys ────────────────────────────────────────────────
 DEEPSEEK_API_KEY=<your-deepseek-api-key>
 QIANWEN_API_KEY=<your-qianwen-api-key>
+LLM_BASE_URL=https://api.deepseek.com/v1
+LLM_PRIMARY_MODEL=deepseek-v4-flash
+LLM_FALLBACK_MODEL=deepseek-v4-pro
 
 # ── 数据库 ──────────────────────────────────────────────────────
 DATABASE_URL=postgresql://mathgrader:${DB_PASSWORD}@postgres:5432/mathgrader

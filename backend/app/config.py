@@ -18,6 +18,13 @@ def _csv_env(name: str, default: str) -> tuple[str, ...]:
     return tuple(value.strip() for value in os.getenv(name, default).split(",") if value.strip())
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class Settings:
     app_env: str = field(default_factory=lambda: os.getenv("APP_ENV", "").strip().lower())
@@ -38,6 +45,13 @@ class Settings:
     persistence_backend: str = field(default_factory=lambda: os.getenv("PERSISTENCE_BACKEND", "memory").strip().lower())
     database_url: str | None = field(default_factory=lambda: os.getenv("DATABASE_URL") or None)
     default_tenant_id: str | None = field(default_factory=lambda: os.getenv("DEFAULT_TENANT_ID") or None)
+    deepseek_api_key: str | None = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY") or None)
+    llm_base_url: str = field(default_factory=lambda: os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1"))
+    llm_primary_model: str = field(default_factory=lambda: os.getenv("LLM_PRIMARY_MODEL", "deepseek-v4-flash"))
+    llm_fallback_model: str = field(default_factory=lambda: os.getenv("LLM_FALLBACK_MODEL", "deepseek-v4-pro"))
+    max_llm_retries: int = field(default_factory=lambda: int(os.getenv("MAX_LLM_RETRIES", "3")))
+    llm_timeout_seconds: float = field(default_factory=lambda: float(os.getenv("LLM_TIMEOUT_SECONDS", "30")))
+    use_mock_llm: bool = field(default_factory=lambda: _bool_env("USE_MOCK_LLM", False))
 
     def __post_init__(self) -> None:
         if not self.app_env:
@@ -46,6 +60,10 @@ class Settings:
             raise RuntimeError("API_PREFIX must start with '/'")
         if self.persistence_backend not in {"memory", "postgres"}:
             raise RuntimeError("PERSISTENCE_BACKEND must be 'memory' or 'postgres'")
+        if self.max_llm_retries < 1:
+            raise RuntimeError("MAX_LLM_RETRIES must be at least 1")
+        if self.llm_timeout_seconds <= 0:
+            raise RuntimeError("LLM_TIMEOUT_SECONDS must be positive")
         if self.persistence_backend == "postgres":
             if not self.database_url:
                 raise RuntimeError("DATABASE_URL is required when PERSISTENCE_BACKEND=postgres")
