@@ -17,7 +17,7 @@ NIL_SYSTEM_USER_ID = "00000000-0000-0000-0000-000000000000"
 
 _USER_COLUMNS = """
     u.id, u.username, u.display_name, u.password_hash, u.role, u.tenant_id,
-    u.grade_level, u.login_fail_count, u.locked_until, u.token_version,
+    u.grade_level, u.login_fail_count, u.locked_until, u.token_version, u.force_change_password,
     CASE
       WHEN u.role = 'teacher' THEN ARRAY(
         SELECT c.id FROM classes c
@@ -72,6 +72,7 @@ class PostgresIdentityProblemRepository:
             failed_logins=int(row["login_fail_count"]),
             locked_until=row["locked_until"],
             token_version=int(row["token_version"]),
+            force_change_password=bool(row["force_change_password"]),
         )
 
     @asynccontextmanager
@@ -136,7 +137,9 @@ class PostgresIdentityProblemRepository:
             version = await connection.fetchval(
                 """
                 UPDATE users
-                SET password_hash = $3, token_version = token_version + 1
+                SET password_hash = $3,
+                    token_version = token_version + 1,
+                    force_change_password = false
                 WHERE tenant_id = $1 AND id = $2 AND NOT is_deleted
                 RETURNING token_version
                 """,

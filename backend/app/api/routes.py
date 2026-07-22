@@ -237,6 +237,7 @@ async def login(
             "role": user.role,
             "grade_level": user.grade_level,
             "tenant_id": user.tenant_id,
+            "force_change_password": user.force_change_password,
         },
     }
     return envelope(request, data)

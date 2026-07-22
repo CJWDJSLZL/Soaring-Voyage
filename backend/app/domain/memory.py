@@ -103,6 +103,7 @@ class InMemoryRepository:
     async def replace_password(self, user: User, password_hash: bytes) -> None:
         user.password_hash = password_hash
         user.token_version += 1
+        user.force_change_password = False
 
     async def increment_token_version(self, user: User) -> None:
         user.token_version += 1
@@ -885,6 +886,7 @@ class InMemoryRepository:
             raise AppError(404, 4004, "用户不存在")
         target.password_hash = password_hash
         target.token_version += 1
+        target.force_change_password = True
         return {
             "user_id": target.user_id,
             "username": target.username,

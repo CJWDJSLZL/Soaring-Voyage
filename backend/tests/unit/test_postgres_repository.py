@@ -48,6 +48,7 @@ def user_row(**overrides: Any) -> dict[str, Any]:
         "login_fail_count": 0,
         "locked_until": None,
         "token_version": 4,
+        "force_change_password": False,
     }
     row.update(overrides)
     return row
@@ -73,6 +74,7 @@ async def test_login_lookup_uses_default_tenant_worker_context_nil_user_and_rela
         0,
         None,
         4,
+        False,
     )
     context_call = connection.execute.await_args_list[0]
     assert context_call.args[2] == NIL_SYSTEM_USER_ID
@@ -140,6 +142,7 @@ async def test_replace_password_updates_varchar_and_token_version_together() -> 
     sql, tenant_arg, user_arg, password_arg = connection.fetchval.await_args.args
     assert "password_hash = $3" in sql
     assert "token_version = token_version + 1" in sql
+    assert "force_change_password = false" in sql
     assert (tenant_arg, user_arg, password_arg) == (TENANT, USER_ID, "new-hash")
     assert user.password_hash == b"new-hash"
     assert user.token_version == 8

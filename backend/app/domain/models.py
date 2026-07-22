@@ -18,6 +18,7 @@ class User:
     failed_logins: int = 0
     locked_until: datetime | None = None
     token_version: int = 0
+    force_change_password: bool = False
 
 
 @dataclass

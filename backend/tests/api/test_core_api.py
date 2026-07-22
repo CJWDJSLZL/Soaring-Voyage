@@ -416,9 +416,19 @@ def test_admin_classes_stats_password_reset_and_ops_jobs(client: TestClient):
     )
     assert reset.status_code == 200
     assert reset.json()["data"]["force_change_on_next_login"] is True
-    assert (
-        client.post("/api/v1/auth/login", json={"username": "student", "password": "TempPass2026"}).status_code == 200
+    reset_login = client.post("/api/v1/auth/login", json={"username": "student", "password": "TempPass2026"})
+    assert reset_login.status_code == 200
+    assert reset_login.json()["data"]["user"]["force_change_password"] is True
+    reset_token = reset_login.json()["data"]["access_token"]
+    changed = client.post(
+        "/api/v1/auth/change-password",
+        headers=auth(reset_token),
+        json={"old_password": "TempPass2026", "new_password": "FreshPass2026"},
     )
+    assert changed.status_code == 200, changed.text
+    changed_login = client.post("/api/v1/auth/login", json={"username": "student", "password": "FreshPass2026"})
+    assert changed_login.status_code == 200
+    assert changed_login.json()["data"]["user"]["force_change_password"] is False
 
     stats = client.get("/api/v1/admin/stats/overview", headers=auth(admin))
     assert stats.status_code == 200
