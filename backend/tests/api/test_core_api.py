@@ -138,6 +138,37 @@ def test_teacher_bulk_import_problems_from_csv(client: TestClient):
     assert job.status_code == 403
 
 
+def test_teacher_deletes_unreferenced_problem_but_not_assigned_problem(client: TestClient):
+    teacher = login(client, "teacher")
+    student = login(client, "student")
+    problem = client.post(
+        "/api/v1/problems/",
+        headers=auth(teacher),
+        json={
+            "problem_text": "1 + 1 = ___",
+            "problem_type": "arithmetic",
+            "reference_answer": "2",
+            "grade_level": 1,
+            "difficulty": "easy",
+            "curriculum_version": "人教版",
+        },
+    )
+    assert problem.status_code == 201, problem.text
+    problem_id = problem.json()["data"]["problem_id"]
+
+    denied = client.delete(f"/api/v1/problems/{problem_id}", headers=auth(student))
+    assert denied.status_code == 403
+    deleted = client.delete(f"/api/v1/problems/{problem_id}", headers=auth(teacher))
+    assert deleted.status_code == 200
+    assert deleted.json()["data"] == {"problem_id": problem_id, "deleted": True}
+    listed = client.get("/api/v1/problems/?grade_level=1", headers=auth(teacher))
+    assert problem_id not in {item["problem_id"] for item in listed.json()["data"]["items"]}
+
+    assigned_problem_id, _assignment_id = make_problem_and_assignment(client, teacher)
+    blocked = client.delete(f"/api/v1/problems/{assigned_problem_id}", headers=auth(teacher))
+    assert blocked.status_code == 409
+
+
 def test_core_submission_hint_and_duplicate_loop(client: TestClient):
     teacher = login(client, "teacher")
     student = login(client, "student")

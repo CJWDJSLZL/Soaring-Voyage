@@ -318,6 +318,50 @@ class PostgresIdentityProblemRepository:
             "has_next": start + page_size < count,
         }
 
+    async def delete_catalog_problem(self, user: User, problem_id: str) -> JsonDict:
+        normalized_problem_id = self._uuid_text(problem_id, "problem_id")
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            problem = await connection.fetchrow(
+                """
+                SELECT id, created_by
+                FROM problems
+                WHERE tenant_id = $1 AND id = $2 AND NOT is_deleted
+                """,
+                user.tenant_id,
+                normalized_problem_id,
+            )
+            if problem is None:
+                raise AppError(404, 4004, "题目不存在")
+            if user.role == "teacher" and str(problem["created_by"]) != user.user_id:
+                raise AppError(403, 4003, "只能删除自己创建的题目")
+            referenced_rows = await connection.fetch(
+                """
+                SELECT assignment_id
+                FROM assignment_problems
+                WHERE tenant_id = $1 AND problem_id = $2
+                ORDER BY assignment_id
+                """,
+                user.tenant_id,
+                normalized_problem_id,
+            )
+            if referenced_rows:
+                raise AppError(
+                    409,
+                    4005,
+                    "该题目已在作业中使用，无法删除",
+                    {"assignment_ids": [str(row["assignment_id"]) for row in referenced_rows]},
+                )
+            await connection.execute(
+                """
+                UPDATE problems
+                SET is_deleted = true
+                WHERE tenant_id = $1 AND id = $2
+                """,
+                user.tenant_id,
+                normalized_problem_id,
+            )
+        return {"problem_id": normalized_problem_id, "deleted": True}
+
     @staticmethod
     def _page(items: list[JsonDict], page_number: int, page_size: int) -> JsonDict:
         total = len(items)

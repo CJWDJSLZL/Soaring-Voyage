@@ -357,6 +357,16 @@ async def list_problems(
     return envelope(request, data)
 
 
+@router.delete("/problems/{problem_id}")
+async def delete_problem(
+    problem_id: str,
+    request: Request,
+    user: User = Depends(require_roles("teacher", "admin", "sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    return envelope(request, await repository.delete_catalog_problem(user, problem_id))
+
+
 @router.post("/assignments/", status_code=201)
 async def create_assignment(
     payload: AssignmentCreate,

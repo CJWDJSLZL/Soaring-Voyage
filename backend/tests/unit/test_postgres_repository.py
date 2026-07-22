@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 import pytest
+from app.core.errors import AppError
 from app.domain.models import User
 from app.domain.postgres import NIL_SYSTEM_USER_ID, PostgresIdentityProblemRepository
 
@@ -304,6 +305,45 @@ async def test_bulk_import_problems_inserts_rows_and_completed_job() -> None:
     assert "INSERT INTO problems" in insert_sql
     job_sql = connection.fetchrow.await_args.args[0]
     assert "bulk_import_problems" in job_sql
+
+
+@pytest.mark.asyncio
+async def test_delete_problem_soft_deletes_unreferenced_teacher_problem() -> None:
+    connection = AsyncMock()
+    connection.fetchrow.return_value = {"id": UUID(PROBLEM_ID), "created_by": UUID(USER_ID)}
+    connection.fetch.return_value = []
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    teacher = PostgresIdentityProblemRepository.user_from_row(user_row())
+
+    result = await repository.delete_catalog_problem(teacher, PROBLEM_ID)
+
+    assert result == {"problem_id": PROBLEM_ID, "deleted": True}
+    update_sql = connection.execute.await_args_list[-1].args[0]
+    assert "UPDATE problems" in update_sql
+    assert "is_deleted = true" in update_sql
+
+
+@pytest.mark.asyncio
+async def test_delete_problem_blocks_foreign_or_referenced_problem() -> None:
+    connection = AsyncMock()
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    teacher = PostgresIdentityProblemRepository.user_from_row(user_row())
+
+    connection.fetchrow.return_value = {
+        "id": UUID(PROBLEM_ID),
+        "created_by": UUID("99999999-9999-4999-8999-999999999999"),
+    }
+    with pytest.raises(AppError) as forbidden:
+        await repository.delete_catalog_problem(teacher, PROBLEM_ID)
+    assert forbidden.value.status_code == 403
+
+    connection.reset_mock()
+    connection.fetchrow.return_value = {"id": UUID(PROBLEM_ID), "created_by": UUID(USER_ID)}
+    connection.fetch.return_value = [{"assignment_id": UUID(ASSIGNMENT_ID)}]
+    with pytest.raises(AppError) as conflict:
+        await repository.delete_catalog_problem(teacher, PROBLEM_ID)
+    assert conflict.value.status_code == 409
+    assert not any("UPDATE problems" in call.args[0] for call in connection.execute.await_args_list)
 
 
 @pytest.mark.asyncio

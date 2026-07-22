@@ -169,7 +169,11 @@ class InMemoryRepository:
         page_number: int,
         page_size: int,
     ) -> JsonDict:
-        items = [item for item in self.problems.values() if item.get("tenant_id") == user.tenant_id]
+        items = [
+            item
+            for item in self.problems.values()
+            if item.get("tenant_id") == user.tenant_id and not item.get("is_deleted")
+        ]
         if grade_level is not None:
             items = [item for item in items if item["grade_level"] == grade_level]
         if problem_type is not None:
@@ -181,6 +185,26 @@ class InMemoryRepository:
             items = [item for item in items if lowered in str(item["problem_text"]).lower()]
         items.sort(key=lambda item: (str(item.get("created_at", "")), str(item["problem_id"])), reverse=True)
         return self._page(items, page_number, page_size)
+
+    async def delete_catalog_problem(self, user: User, problem_id: str) -> JsonDict:
+        from app.core.errors import AppError
+
+        problem = self.problems.get(problem_id)
+        if problem is None or problem["tenant_id"] != user.tenant_id or problem.get("is_deleted"):
+            raise AppError(404, 4004, "题目不存在")
+        if user.role == "teacher" and problem.get("created_by") != user.user_id:
+            raise AppError(403, 4003, "只能删除自己创建的题目")
+        referenced = [
+            assignment_id
+            for assignment_id, assignment in self.assignments.items()
+            if assignment["tenant_id"] == user.tenant_id and problem_id in assignment["problem_ids"]
+        ]
+        if referenced:
+            raise AppError(409, 4005, "该题目已在作业中使用，无法删除", {"assignment_ids": referenced})
+        problem["is_deleted"] = True
+        problem["deleted_at"] = utcnow().isoformat()
+        problem["deleted_by"] = user.user_id
+        return {"problem_id": problem_id, "deleted": True}
 
     @staticmethod
     def _page(items: list[JsonDict], page_number: int, page_size: int) -> JsonDict:
