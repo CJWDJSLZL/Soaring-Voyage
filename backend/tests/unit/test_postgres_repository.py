@@ -496,6 +496,16 @@ async def test_teacher_dashboard_aggregates_visible_classes() -> None:
         [{"error_type": "calculation_error", "count": 2}],
         [{"bucket": datetime(2026, 7, 20, tzinfo=UTC).date(), "total_results": 4, "correct_results": 3}],
         [{"knowledge_point": "addition", "affected_student_count": 2, "total_results": 4, "error_rate": 0.5}],
+        [
+            {
+                "student_id": UUID("44444444-4444-4444-8444-444444444444"),
+                "student_name": "Student",
+                "recent_accuracy": 0.5,
+                "weak_points": ["calculation_error"],
+                "hint_dependency_rate": 0.75,
+                "consecutive_wrong_count": 2,
+            }
+        ],
     ]
     connection.fetchval.side_effect = [2, 1]
     connection.fetchrow.return_value = {
@@ -524,10 +534,22 @@ async def test_teacher_dashboard_aggregates_visible_classes() -> None:
             "affected_student_count": 2,
         }
     ]
+    assert dashboard["students_needing_attention"] == [
+        {
+            "student_id": "44444444-4444-4444-8444-444444444444",
+            "student_name": "Student",
+            "recent_accuracy": 0.5,
+            "weak_points": ["calculation_error"],
+            "hint_dependency_rate": 0.75,
+            "consecutive_wrong_count": 2,
+        }
+    ]
     class_sql = connection.fetch.await_args_list[0].args[0]
     assert "teacher_id = $4::uuid" in class_sql
     alert_sql = connection.fetch.await_args_list[3].args[0]
     assert "student_error_history" in alert_sql
+    attention_sql = connection.fetch.await_args_list[4].args[0]
+    assert "submission_answers" in attention_sql
 
 
 @pytest.mark.asyncio

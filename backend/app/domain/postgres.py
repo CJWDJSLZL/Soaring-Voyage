@@ -1739,6 +1739,86 @@ class PostgresIdentityProblemRepository:
                 normalized_assignment_id,
                 cutoff,
             )
+            attention_rows = await connection.fetch(
+                """
+                WITH visible_submissions AS (
+                    SELECT DISTINCT s.id, s.student_id
+                    FROM submissions s
+                    JOIN assignment_classes ac ON ac.tenant_id = s.tenant_id AND ac.assignment_id = s.assignment_id
+                    WHERE s.tenant_id = $1
+                      AND ac.class_id = ANY($2::uuid[])
+                      AND ($3::uuid IS NULL OR s.assignment_id = $3::uuid)
+                      AND s.submitted_at >= $4
+                ),
+                latest AS (
+                    SELECT DISTINCT ON (gr.submission_id, gr.problem_id)
+                           vs.student_id,
+                           u.display_name AS student_name,
+                           gr.problem_id,
+                           gr.is_correct,
+                           gr.error_type,
+                           COALESCE(sa.hint_level, gr.hint_level, 0) AS hint_level
+                    FROM grading_results gr
+                    JOIN visible_submissions vs ON vs.id = gr.submission_id
+                    JOIN users u ON u.tenant_id = gr.tenant_id AND u.id = vs.student_id
+                    LEFT JOIN submission_answers sa
+                      ON sa.tenant_id = gr.tenant_id
+                     AND sa.submission_id = gr.submission_id
+                     AND sa.problem_id = gr.problem_id
+                     AND sa.attempt_number = gr.attempt_number
+                    WHERE gr.tenant_id = $1
+                    ORDER BY gr.submission_id, gr.problem_id, gr.attempt_number DESC
+                ),
+                summary AS (
+                    SELECT student_id,
+                           student_name,
+                           COUNT(*) AS total_results,
+                           COUNT(*) FILTER (WHERE is_correct IS TRUE) AS correct_results,
+                           COUNT(*) FILTER (WHERE is_correct IS FALSE) AS wrong_results,
+                           COUNT(*) FILTER (WHERE hint_level > 0) AS hinted_results
+                    FROM latest
+                    GROUP BY student_id, student_name
+                ),
+                error_counts AS (
+                    SELECT student_id, error_type, COUNT(*) AS count
+                    FROM latest
+                    WHERE is_correct IS FALSE AND error_type IS NOT NULL
+                    GROUP BY student_id, error_type
+                ),
+                ranked_errors AS (
+                    SELECT student_id,
+                           error_type,
+                           row_number() OVER (PARTITION BY student_id ORDER BY count DESC, error_type) AS rank
+                    FROM error_counts
+                ),
+                weak_points AS (
+                    SELECT student_id,
+                           array_agg(error_type ORDER BY rank) AS weak_points
+                    FROM ranked_errors
+                    WHERE rank <= 3
+                    GROUP BY student_id
+                )
+                SELECT summary.student_id,
+                       summary.student_name,
+                       summary.correct_results::double precision / summary.total_results AS recent_accuracy,
+                       COALESCE(weak_points.weak_points, ARRAY[]::text[]) AS weak_points,
+                       summary.hinted_results::double precision / summary.total_results AS hint_dependency_rate,
+                       summary.wrong_results AS consecutive_wrong_count
+                FROM summary
+                LEFT JOIN weak_points ON weak_points.student_id = summary.student_id
+                WHERE summary.total_results > 0
+                  AND (
+                    summary.correct_results::double precision / summary.total_results < 0.6
+                    OR summary.hinted_results::double precision / summary.total_results >= 0.5
+                  )
+                ORDER BY recent_accuracy ASC, hint_dependency_rate DESC, summary.student_name
+                LIMIT 10
+                """,
+                user.tenant_id,
+                class_ids,
+                normalized_assignment_id,
+                cutoff,
+            )
         total_submissions = int(overview["total_submissions"] or 0)
         total_results = int(overview["total_results"] or 0)
         correct_results = int(overview["correct_results"] or 0)
@@ -1768,7 +1848,17 @@ class PostgresIdentityProblemRepository:
                 }
                 for row in alert_rows
             ],
-            "students_needing_attention": [],
+            "students_needing_attention": [
+                {
+                    "student_id": str(row["student_id"]),
+                    "student_name": row["student_name"],
+                    "recent_accuracy": round(float(row["recent_accuracy"] or 0), 3),
+                    "weak_points": list(row["weak_points"] or []),
+                    "hint_dependency_rate": round(float(row["hint_dependency_rate"] or 0), 3),
+                    "consecutive_wrong_count": int(row["consecutive_wrong_count"] or 0),
+                }
+                for row in attention_rows
+            ],
             "pending_review_count": human_review_results,
             "accuracy_trend": [
                 {
