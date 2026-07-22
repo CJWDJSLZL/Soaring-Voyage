@@ -473,7 +473,15 @@ async def test_assignment_stats_checks_visibility_and_aggregates_problem_results
                 "error_counts": {"计算错误": 1},
             }
         ],
-        [{"knowledge_point": "addition", "affected_student_count": 1, "total_results": 2, "error_rate": 0.5}],
+        [
+            {
+                "knowledge_point": "addition",
+                "problem_ids": [UUID(PROBLEM_ID)],
+                "affected_student_count": 1,
+                "total_results": 2,
+                "error_rate": 0.5,
+            }
+        ],
     ]
     repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
     teacher = PostgresIdentityProblemRepository.user_from_row(user_row())
@@ -488,9 +496,12 @@ async def test_assignment_stats_checks_visibility_and_aggregates_problem_results
     assert stats["knowledge_point_alerts"] == [
         {
             "knowledge_point": "addition",
+            "problem_ids": [PROBLEM_ID],
             "error_rate": 0.5,
+            "class_error_rate": 0.5,
             "alert_level": "high",
             "alert": "超过40%学生在此知识点出错，建议重点讲解",
+            "alert_message": "超过40%学生在此知识点出错，建议重点讲解",
             "affected_student_count": 1,
         }
     ]

@@ -242,6 +242,9 @@ def test_core_submission_hint_and_duplicate_loop(client: TestClient):
     initial_stats_data = initial_stats.json()["data"]
     assert initial_stats_data["average_accuracy"] == 0.0
     assert initial_stats_data["knowledge_point_alerts"][0]["knowledge_point"] == "加法"
+    assert initial_stats_data["knowledge_point_alerts"][0]["problem_ids"] == [problem_id]
+    assert initial_stats_data["knowledge_point_alerts"][0]["class_error_rate"] == 1.0
+    assert initial_stats_data["knowledge_point_alerts"][0]["alert_message"]
     assert initial_stats_data["knowledge_point_alerts"][0]["affected_student_count"] == 1
 
     hint = client.post(

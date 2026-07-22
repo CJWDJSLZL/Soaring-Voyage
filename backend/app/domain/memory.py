@@ -842,6 +842,7 @@ class InMemoryRepository:
     def _knowledge_point_alerts(self, submissions: list[JsonDict]) -> list[JsonDict]:
         totals: dict[str, int] = {}
         wrong: dict[str, set[str]] = {}
+        problem_ids: dict[str, set[str]] = {}
         for submission in submissions:
             for result in submission["results"]:
                 problem = self.problems.get(result["problem_id"], {})
@@ -849,6 +850,7 @@ class InMemoryRepository:
                     totals[str(tag)] = totals.get(str(tag), 0) + 1
                     if result.get("is_correct") is False:
                         wrong.setdefault(str(tag), set()).add(submission["student_id"])
+                        problem_ids.setdefault(str(tag), set()).add(str(result["problem_id"]))
         alerts: list[JsonDict] = []
         for tag, affected_students in wrong.items():
             total = totals.get(tag, 0)
@@ -857,9 +859,12 @@ class InMemoryRepository:
                 alerts.append(
                     {
                         "knowledge_point": tag,
+                        "problem_ids": sorted(problem_ids.get(tag, set())),
                         "error_rate": error_rate,
+                        "class_error_rate": error_rate,
                         "alert_level": "high",
                         "alert": "超过40%学生在此知识点出错，建议重点讲解",
+                        "alert_message": "超过40%学生在此知识点出错，建议重点讲解",
                         "affected_student_count": len(affected_students),
                     }
                 )

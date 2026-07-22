@@ -776,12 +776,14 @@ class PostgresIdentityProblemRepository:
                 ),
                 wrong AS (
                   SELECT alert_point AS knowledge_point,
-                         COUNT(DISTINCT student_id) AS affected_student_count
+                         COUNT(DISTINCT student_id) AS affected_student_count,
+                         array_agg(DISTINCT problem_id ORDER BY problem_id) AS problem_ids
                   FROM tagged
                   WHERE is_correct IS FALSE
                   GROUP BY alert_point
                 )
                 SELECT wrong.knowledge_point,
+                       wrong.problem_ids,
                        wrong.affected_student_count,
                        totals.total_results,
                        wrong.affected_student_count::double precision / totals.total_results AS error_rate
@@ -838,9 +840,12 @@ class PostgresIdentityProblemRepository:
             "knowledge_point_alerts": [
                 {
                     "knowledge_point": row["knowledge_point"],
+                    "problem_ids": [str(problem_id) for problem_id in (row["problem_ids"] or [])],
                     "error_rate": round(float(row["error_rate"] or 0), 3),
+                    "class_error_rate": round(float(row["error_rate"] or 0), 3),
                     "alert_level": "high",
                     "alert": "超过40%学生在此知识点出错，建议重点讲解",
+                    "alert_message": "超过40%学生在此知识点出错，建议重点讲解",
                     "affected_student_count": int(row["affected_student_count"] or 0),
                 }
                 for row in alert_rows
