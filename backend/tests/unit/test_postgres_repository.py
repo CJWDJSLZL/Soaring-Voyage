@@ -324,3 +324,47 @@ async def test_submit_assignment_persists_answer_grading_and_review_queue() -> N
     assert result["status"] == "partial_human_review"
     assert result["summary"]["pending_review"] == 1
     assert "agent_trace" not in result["results"][0]
+
+
+@pytest.mark.asyncio
+async def test_assignment_stats_checks_visibility_and_aggregates_problem_results() -> None:
+    connection = AsyncMock()
+    connection.fetchrow.side_effect = [
+        {
+            "id": UUID(ASSIGNMENT_ID),
+            "title": "A",
+            "due_date": None,
+            "class_ids": [UUID(CLASS_ID)],
+        },
+        {"total_results": 2, "correct_results": 1},
+    ]
+    connection.fetchval.side_effect = [3, 2]
+    connection.fetch.return_value = [
+        {
+            "id": UUID(PROBLEM_ID),
+            "problem_text": "1 + 1 = ___",
+            "position": 1,
+            "total_attempts": 3,
+            "correct_first_try": 1,
+            "answered_count": 2,
+            "correct_after_hint": 0,
+            "still_wrong": 1,
+            "pending_review": 0,
+            "avg_hint_used": 0.5,
+            "error_counts": {"计算错误": 1},
+        }
+    ]
+    repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
+    teacher = PostgresIdentityProblemRepository.user_from_row(user_row())
+
+    stats = await repository.assignment_stats(teacher, ASSIGNMENT_ID)
+
+    assert stats["total_students"] == 3
+    assert stats["submitted_count"] == 2
+    assert stats["submission_rate"] == 0.667
+    assert stats["average_accuracy"] == 0.5
+    assert stats["problem_stats"][0]["accuracy_first_try"] == 0.5
+    assert stats["problem_stats"][0]["top_error_types"] == [{"error_type": "计算错误", "count": 1, "percentage": 0.5}]
+    fetched_sql = "\n".join(call.args[0] for call in connection.fetch.await_args_list)
+    assert "assignment_problems" in fetched_sql
+    assert "grading_results" in fetched_sql

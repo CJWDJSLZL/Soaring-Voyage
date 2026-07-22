@@ -137,6 +137,17 @@ def test_core_submission_hint_and_duplicate_loop(client: TestClient):
     assert hint.status_code == 200
     assert hint.json()["data"]["is_correct"] is True
     assert hint.json()["data"]["hint_level"] == 1
+    denied_stats = client.get(f"/api/v1/assignments/{assignment_id}/stats", headers=auth(student))
+    assert denied_stats.status_code == 403
+    stats = client.get(f"/api/v1/assignments/{assignment_id}/stats", headers=auth(teacher))
+    assert stats.status_code == 200
+    stats_data = stats.json()["data"]
+    assert stats_data["total_students"] == 1
+    assert stats_data["submitted_count"] == 1
+    assert stats_data["average_accuracy"] == 1.0
+    assert stats_data["problem_stats"][0]["problem_id"] == problem_id
+    assert stats_data["problem_stats"][0]["correct_first_try"] == 0
+    assert stats_data["problem_stats"][0]["correct_after_hint"] == 1
 
     other_student = login(client, "student2")
     hidden = client.get(f"/api/v1/submissions/{submission_id}", headers=auth(other_student))

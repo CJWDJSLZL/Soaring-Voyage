@@ -289,6 +289,98 @@ class InMemoryRepository:
             data["my_submission"] = {"submission_id": mine["submission_id"], "status": mine["status"]} if mine else None
         return data
 
+    async def assignment_stats(self, user: User, assignment_id: str) -> JsonDict:
+        from app.core.errors import AppError
+
+        assignment = self.assignments.get(assignment_id)
+        if (
+            assignment is None
+            or assignment["tenant_id"] != user.tenant_id
+            or not (user.role in {"admin", "sysadmin"} or bool(set(user.class_ids) & set(assignment["class_ids"])))
+        ):
+            raise AppError(404, 4004, "作业不存在")
+        class_ids = set(assignment["class_ids"])
+        total_students = sum(
+            item.tenant_id == user.tenant_id and item.role == "student" and bool(set(item.class_ids) & class_ids)
+            for item in self.users.values()
+        )
+        submissions = [
+            item
+            for item in self.submissions.values()
+            if item["tenant_id"] == user.tenant_id and item["assignment_id"] == assignment_id
+        ]
+        latest_results = [result for submission in submissions for result in submission["results"]]
+        correct = sum(result.get("is_correct") is True for result in latest_results)
+        problem_stats: list[JsonDict] = []
+        for sequence, problem_id in enumerate(assignment["problem_ids"], 1):
+            problem = self.problems[problem_id]
+            attempts = [
+                attempt
+                for submission in submissions
+                for attempt in self.attempts.get(submission["submission_id"], {}).get(problem_id, [])
+            ]
+            latest_by_submission = [
+                next((item for item in submission["results"] if item["problem_id"] == problem_id), None)
+                for submission in submissions
+            ]
+            latest = [item for item in latest_by_submission if item is not None]
+            error_counts: dict[str, int] = {}
+            for result in latest:
+                if result.get("error_type"):
+                    error_counts[str(result["error_type"])] = error_counts.get(str(result["error_type"]), 0) + 1
+            answered = len(latest)
+            problem_stats.append(
+                {
+                    "problem_id": problem_id,
+                    "sequence": sequence,
+                    "problem_text": problem["problem_text"],
+                    "total_attempts": len(attempts) or answered,
+                    "correct_first_try": sum(
+                        attempt.get("attempt_number") == 1 and attempt.get("is_correct") is True for attempt in attempts
+                    ),
+                    "correct_after_hint": sum(
+                        result.get("attempt_number", 1) > 1 and result.get("is_correct") is True for result in latest
+                    ),
+                    "still_wrong": sum(result.get("is_correct") is False for result in latest),
+                    "pending_review": sum(result.get("routed_to_human") for result in latest),
+                    "accuracy_first_try": round(
+                        sum(
+                            attempt.get("attempt_number") == 1 and attempt.get("is_correct") is True
+                            for attempt in attempts
+                        )
+                        / answered,
+                        3,
+                    )
+                    if answered
+                    else 0.0,
+                    "top_error_types": [
+                        {
+                            "error_type": key,
+                            "count": value,
+                            "percentage": round(value / answered, 3) if answered else 0.0,
+                        }
+                        for key, value in sorted(error_counts.items(), key=lambda item: item[1], reverse=True)[:5]
+                    ],
+                    "avg_hint_used": round(sum(result.get("hint_level", 0) for result in latest) / answered, 3)
+                    if answered
+                    else 0.0,
+                }
+            )
+        error_distribution: dict[str, int] = {}
+        for result in latest_results:
+            if result.get("error_type"):
+                error_distribution[str(result["error_type"])] = error_distribution.get(str(result["error_type"]), 0) + 1
+        return {
+            "assignment_id": assignment_id,
+            "total_students": total_students,
+            "submitted_count": len(submissions),
+            "submission_rate": round(len(submissions) / total_students, 3) if total_students else 0.0,
+            "average_accuracy": round(correct / len(latest_results), 3) if latest_results else 0.0,
+            "problem_stats": problem_stats,
+            "error_distribution": error_distribution,
+            "knowledge_point_alerts": [],
+        }
+
     async def create_class(self, user: User, payload: dict[str, Any]) -> JsonDict:
         from app.core.errors import AppError
 

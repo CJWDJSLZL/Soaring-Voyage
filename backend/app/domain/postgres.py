@@ -510,6 +510,166 @@ class PostgresIdentityProblemRepository:
             )
         return data
 
+    async def assignment_stats(self, user: User, assignment_id: str) -> JsonDict:
+        normalized_assignment_id = self._uuid_text(assignment_id, "assignment_id")
+        async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
+            await self._visible_assignment(connection, user, normalized_assignment_id)
+            total_students = await connection.fetchval(
+                """
+                SELECT COUNT(DISTINCT cs.student_id)
+                FROM assignment_classes ac
+                JOIN class_students cs
+                  ON cs.tenant_id = ac.tenant_id
+                 AND cs.class_id = ac.class_id
+                 AND cs.is_active
+                JOIN users u
+                  ON u.tenant_id = cs.tenant_id
+                 AND u.id = cs.student_id
+                 AND u.role = 'student'
+                 AND NOT u.is_deleted
+                WHERE ac.tenant_id = $1 AND ac.assignment_id = $2
+                """,
+                user.tenant_id,
+                normalized_assignment_id,
+            )
+            submitted_count = await connection.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM submissions
+                WHERE tenant_id = $1 AND assignment_id = $2
+                """,
+                user.tenant_id,
+                normalized_assignment_id,
+            )
+            overall = await connection.fetchrow(
+                """
+                WITH latest AS (
+                  SELECT DISTINCT ON (gr.submission_id, gr.problem_id)
+                         gr.is_correct
+                  FROM grading_results gr
+                  WHERE gr.tenant_id = $1
+                    AND gr.submission_id IN (
+                      SELECT id FROM submissions WHERE tenant_id = $1 AND assignment_id = $2
+                    )
+                  ORDER BY gr.submission_id, gr.problem_id, gr.attempt_number DESC
+                )
+                SELECT COUNT(*) AS total_results,
+                       COUNT(*) FILTER (WHERE is_correct IS TRUE) AS correct_results
+                FROM latest
+                """,
+                user.tenant_id,
+                normalized_assignment_id,
+            )
+            problem_rows = await connection.fetch(
+                """
+                WITH latest AS (
+                  SELECT DISTINCT ON (gr.submission_id, gr.problem_id)
+                         gr.submission_id, gr.problem_id, gr.attempt_number, gr.is_correct,
+                         gr.error_type, gr.routed_to_human, sa.hint_level
+                  FROM grading_results gr
+                  JOIN submissions s ON s.tenant_id = gr.tenant_id AND s.id = gr.submission_id
+                  LEFT JOIN submission_answers sa
+                    ON sa.tenant_id = gr.tenant_id
+                   AND sa.submission_id = gr.submission_id
+                   AND sa.problem_id = gr.problem_id
+                   AND sa.attempt_number = gr.attempt_number
+                  WHERE gr.tenant_id = $1 AND s.assignment_id = $2
+                  ORDER BY gr.submission_id, gr.problem_id, gr.attempt_number DESC
+                ),
+                latest_stats AS (
+                  SELECT problem_id,
+                         COUNT(*) AS answered_count,
+                         COUNT(*) FILTER (WHERE attempt_number > 1 AND is_correct IS TRUE) AS correct_after_hint,
+                         COUNT(*) FILTER (WHERE is_correct IS FALSE) AS still_wrong,
+                         COUNT(*) FILTER (WHERE routed_to_human) AS pending_review,
+                         COALESCE(AVG(hint_level), 0) AS avg_hint_used
+                  FROM latest
+                  GROUP BY problem_id
+                ),
+                error_counts AS (
+                  SELECT problem_id, error_type, COUNT(*) AS count
+                  FROM latest
+                  WHERE error_type IS NOT NULL
+                  GROUP BY problem_id, error_type
+                ),
+                error_json AS (
+                  SELECT problem_id, jsonb_object_agg(error_type, count) AS error_counts
+                  FROM error_counts
+                  GROUP BY problem_id
+                ),
+                attempts AS (
+                  SELECT gr.problem_id,
+                         COUNT(*) AS total_attempts,
+                         COUNT(*) FILTER (WHERE gr.attempt_number = 1 AND gr.is_correct IS TRUE) AS correct_first_try
+                  FROM grading_results gr
+                  JOIN submissions s ON s.tenant_id = gr.tenant_id AND s.id = gr.submission_id
+                  WHERE gr.tenant_id = $1 AND s.assignment_id = $2
+                  GROUP BY gr.problem_id
+                )
+                SELECT p.id, p.problem_text, ap.position,
+                       COALESCE(a.total_attempts, 0) AS total_attempts,
+                       COALESCE(a.correct_first_try, 0) AS correct_first_try,
+                       COALESCE(ls.answered_count, 0) AS answered_count,
+                       COALESCE(ls.correct_after_hint, 0) AS correct_after_hint,
+                       COALESCE(ls.still_wrong, 0) AS still_wrong,
+                       COALESCE(ls.pending_review, 0) AS pending_review,
+                       COALESCE(ls.avg_hint_used, 0) AS avg_hint_used,
+                       COALESCE(ej.error_counts, '{}'::jsonb) AS error_counts
+                FROM assignment_problems ap
+                JOIN problems p ON p.tenant_id = ap.tenant_id AND p.id = ap.problem_id
+                LEFT JOIN attempts a ON a.problem_id = ap.problem_id
+                LEFT JOIN latest_stats ls ON ls.problem_id = ap.problem_id
+                LEFT JOIN error_json ej ON ej.problem_id = ap.problem_id
+                WHERE ap.tenant_id = $1 AND ap.assignment_id = $2
+                ORDER BY ap.position
+                """,
+                user.tenant_id,
+                normalized_assignment_id,
+            )
+        total_students_int = int(total_students or 0)
+        submitted_count_int = int(submitted_count or 0)
+        total_results = int(overall["total_results"] or 0)
+        correct_results = int(overall["correct_results"] or 0)
+        problem_stats: list[JsonDict] = []
+        error_distribution: dict[str, int] = {}
+        for row in problem_rows:
+            answered = int(row["answered_count"] or 0)
+            error_counts = self._json_value(row["error_counts"], {})
+            for key, value in error_counts.items():
+                error_distribution[str(key)] = error_distribution.get(str(key), 0) + int(value)
+            problem_stats.append(
+                {
+                    "problem_id": str(row["id"]),
+                    "sequence": int(row["position"]),
+                    "problem_text": row["problem_text"],
+                    "total_attempts": int(row["total_attempts"] or 0),
+                    "correct_first_try": int(row["correct_first_try"] or 0),
+                    "correct_after_hint": int(row["correct_after_hint"] or 0),
+                    "still_wrong": int(row["still_wrong"] or 0),
+                    "pending_review": int(row["pending_review"] or 0),
+                    "accuracy_first_try": round(int(row["correct_first_try"] or 0) / answered, 3) if answered else 0.0,
+                    "top_error_types": [
+                        {
+                            "error_type": key,
+                            "count": int(value),
+                            "percentage": round(int(value) / answered, 3) if answered else 0.0,
+                        }
+                        for key, value in sorted(error_counts.items(), key=lambda item: int(item[1]), reverse=True)[:5]
+                    ],
+                    "avg_hint_used": round(float(row["avg_hint_used"] or 0), 3),
+                }
+            )
+        return {
+            "assignment_id": normalized_assignment_id,
+            "total_students": total_students_int,
+            "submitted_count": submitted_count_int,
+            "submission_rate": round(submitted_count_int / total_students_int, 3) if total_students_int else 0.0,
+            "average_accuracy": round(correct_results / total_results, 3) if total_results else 0.0,
+            "problem_stats": problem_stats,
+            "error_distribution": error_distribution,
+            "knowledge_point_alerts": [],
+        }
+
     async def patch_assignment(self, user: User, assignment_id: str, payload: dict[str, Any]) -> JsonDict:
         normalized_assignment_id = self._uuid_text(assignment_id, "assignment_id")
         add_problem_ids = list(payload.get("add_problem_ids") or [])

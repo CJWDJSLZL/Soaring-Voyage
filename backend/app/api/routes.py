@@ -373,6 +373,16 @@ async def assignment_detail(
     return envelope(request, await repository.assignment_detail(user, assignment_id))
 
 
+@router.get("/assignments/{assignment_id}/stats")
+async def assignment_stats(
+    assignment_id: str,
+    request: Request,
+    user: User = Depends(require_roles("teacher", "admin", "sysadmin")),
+    repository: IdentityProblemRepository = Depends(get_identity_repository),
+):
+    return envelope(request, await repository.assignment_stats(user, assignment_id))
+
+
 @router.patch("/assignments/{assignment_id}")
 async def patch_assignment(
     assignment_id: str,
