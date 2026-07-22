@@ -22,6 +22,17 @@ class FakeHarnessLLMGrader:
         return LLMVerdict(is_correct=self.engine.grade(request).is_correct, confidence=0.99)
 
 
+class FakeRagIndexer:
+    status = "qdrant-configured"
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[dict]]] = []
+
+    async def upsert_problems(self, tenant_id: str, problems: list[dict]) -> int:
+        self.calls.append((tenant_id, problems))
+        return len(problems)
+
+
 @pytest.fixture(autouse=True)
 def reset_state():
     app.state.store.reset()
@@ -490,22 +501,30 @@ def test_admin_classes_stats_password_reset_and_ops_jobs(client: TestClient):
 
     rag_problem_id, _assignment_id = make_problem_and_assignment(client, teacher)
     assert app.state.store.problems[rag_problem_id]["embedding_status"] == "pending"
+    fake_rag = FakeRagIndexer()
+    original_rag_indexer = app.state.rag_indexer
+    app.state.rag_indexer = fake_rag
 
-    rag = client.post(
-        "/api/v1/ops/rag/ingest",
-        headers=auth(sysadmin),
-        json={"source": "problems_table", "grade_levels": [3], "batch_size": 100, "force_reingest": False},
-    )
+    try:
+        rag = client.post(
+            "/api/v1/ops/rag/ingest",
+            headers=auth(sysadmin),
+            json={"source": "problems_table", "grade_levels": [3], "batch_size": 100, "force_reingest": False},
+        )
+    finally:
+        app.state.rag_indexer = original_rag_indexer
     assert rag.status_code == 202
     assert rag.json()["data"]["status"] == "succeeded"
     assert rag.json()["data"]["matched_problem_count"] == 1
     assert rag.json()["data"]["ingested_count"] == 1
     assert app.state.store.problems[rag_problem_id]["embedding_status"] == "done"
+    assert fake_rag.calls[0][0] == "tenant-demo"
+    assert fake_rag.calls[0][1][0]["problem_id"] == rag_problem_id
     job_id = rag.json()["data"]["job_id"]
     job = client.get(f"/api/v1/ops/jobs/{job_id}", headers=auth(sysadmin))
     assert job.status_code == 200
     assert job.json()["data"]["status"] == "succeeded"
-    assert job.json()["data"]["result"]["qdrant_status"] == "local_metadata_indexed"
+    assert job.json()["data"]["result"]["qdrant_status"] == "qdrant_indexed"
     assert job.json()["data"]["error_message"] is None
 
 

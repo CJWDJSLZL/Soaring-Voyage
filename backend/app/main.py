@@ -20,14 +20,28 @@ from app.db.pool import create_pool
 from app.domain.memory import InMemoryRepository
 from app.domain.postgres import PostgresIdentityProblemRepository
 from app.grading import DeepSeekGradingClient, LLMClientConfig
+from app.rag import QdrantIndexer, QdrantIndexerConfig
 from app.realtime import MemoryTicketRepository, RedisTicketRepository, TicketRepository
 
 PoolFactory = Callable[[str], Awaitable[asyncpg.Pool]]
 RedisFactory = Callable[[str], Redis]
+QdrantIndexerFactory = Callable[[Settings], QdrantIndexer | None]
 
 
 def create_redis_client(redis_url: str) -> Redis:
     return Redis.from_url(redis_url, decode_responses=True)
+
+
+def create_qdrant_indexer(configured: Settings) -> QdrantIndexer | None:
+    if not configured.qdrant_url:
+        return None
+    return QdrantIndexer(
+        QdrantIndexerConfig(
+            url=configured.qdrant_url,
+            collection=configured.qdrant_collection,
+            vector_size=configured.qdrant_vector_size,
+        )
+    )
 
 
 def create_app(
@@ -35,6 +49,7 @@ def create_app(
     *,
     pool_factory: PoolFactory = create_pool,
     redis_factory: RedisFactory = create_redis_client,
+    qdrant_indexer_factory: QdrantIndexerFactory = create_qdrant_indexer,
 ) -> FastAPI:
     """Build an application with an explicit persistence adapter lifecycle."""
     store = InMemoryRepository() if configured.is_development else None
@@ -45,6 +60,7 @@ def create_app(
         application.state.store = store
         application.state.pool = None
         application.state.redis_client = None
+        application.state.rag_indexer = qdrant_indexer_factory(configured)
         application.state.identity_repository = store
         application.state.ticket_repository = MemoryTicketRepository(store.tickets) if store is not None else None
         application.state.llm_grader = DeepSeekGradingClient(LLMClientConfig.from_settings(configured))
@@ -67,6 +83,9 @@ def create_app(
             ticket_repository: TicketRepository = application.state.ticket_repository
             if ticket_repository is not None:
                 await ticket_repository.close()
+            rag_indexer = application.state.rag_indexer
+            if rag_indexer is not None:
+                await rag_indexer.close()
             await application.state.llm_grader.close()
 
     application = FastAPI(title="翱翔启航 API", version="1.0.0", lifespan=lifespan)
@@ -77,6 +96,7 @@ def create_app(
     application.state.store = store
     application.state.pool = None
     application.state.redis_client = None
+    application.state.rag_indexer = None
     application.state.identity_repository = store
     application.state.ticket_repository = MemoryTicketRepository(store.tickets) if store is not None else None
     application.state.llm_grader = DeepSeekGradingClient(LLMClientConfig.from_settings(configured))
@@ -153,7 +173,9 @@ def create_app(
                 else "unavailable"
                 if configured.redis_url
                 else "not-wired",
-                "qdrant": "local-metadata-index",
+                "qdrant": request.app.state.rag_indexer.status
+                if request.app.state.rag_indexer is not None
+                else "local-metadata-index",
                 "llm": request.app.state.llm_grader.health_status,
             },
         }

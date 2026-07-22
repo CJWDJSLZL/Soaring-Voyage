@@ -52,6 +52,9 @@ class Settings:
     database_url: str | None = field(default_factory=lambda: os.getenv("DATABASE_URL") or None)
     default_tenant_id: str | None = field(default_factory=lambda: os.getenv("DEFAULT_TENANT_ID") or None)
     redis_url: str | None = field(default_factory=lambda: os.getenv("REDIS_URL") or None)
+    qdrant_url: str | None = field(default_factory=lambda: os.getenv("QDRANT_URL") or None)
+    qdrant_collection: str = field(default_factory=lambda: os.getenv("QDRANT_COLLECTION", "problem_vectors"))
+    qdrant_vector_size: int = field(default_factory=lambda: int(os.getenv("QDRANT_VECTOR_SIZE", "64")))
     deepseek_api_key: str | None = field(default_factory=lambda: os.getenv("DEEPSEEK_API_KEY") or None)
     llm_base_url: str = field(default_factory=lambda: os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1"))
     llm_primary_model: str = field(default_factory=lambda: os.getenv("LLM_PRIMARY_MODEL", "deepseek-v4-flash"))
@@ -77,6 +80,10 @@ class Settings:
             raise RuntimeError("MAX_LLM_RETRIES must be at least 1")
         if self.llm_timeout_seconds <= 0:
             raise RuntimeError("LLM_TIMEOUT_SECONDS must be positive")
+        if self.qdrant_vector_size <= 0:
+            raise RuntimeError("QDRANT_VECTOR_SIZE must be positive")
+        if not self.qdrant_collection.strip():
+            raise RuntimeError("QDRANT_COLLECTION must not be empty")
         if self.persistence_backend == "postgres":
             if not self.database_url:
                 raise RuntimeError("DATABASE_URL is required when PERSISTENCE_BACKEND=postgres")
@@ -98,6 +105,8 @@ class Settings:
                 "Production startup refused: configure PostgreSQL and Redis adapters before selecting "
                 "APP_ENV outside test/development"
             )
+        if not self.qdrant_url:
+            raise RuntimeError("Production startup refused: configure QDRANT_URL before selecting production")
         if not self.allowed_origins_configured or any(
             origin.startswith("http://localhost") for origin in self.allowed_origins
         ):

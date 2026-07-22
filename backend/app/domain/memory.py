@@ -956,7 +956,9 @@ class InMemoryRepository:
             raise AppError(404, 4004, "Harness 运行记录不存在")
         return run
 
-    async def create_rag_ingest_job(self, user: User, payload: dict[str, Any]) -> JsonDict:
+    async def create_rag_ingest_job(
+        self, user: User, payload: dict[str, Any], rag_indexer: Any | None = None
+    ) -> JsonDict:
         job_id = str(uuid4())
         now = utcnow().isoformat()
         matched = [
@@ -971,6 +973,11 @@ class InMemoryRepository:
         for item in to_ingest:
             item["embedding_id"] = f"rag-{item['problem_id']}"
             item["embedding_status"] = "done"
+        qdrant_status = "local_metadata_indexed"
+        ingested_count = len(to_ingest)
+        if rag_indexer is not None:
+            ingested_count = await rag_indexer.upsert_problems(user.tenant_id, to_ingest)
+            qdrant_status = "qdrant_indexed"
         job = {
             "job_id": job_id,
             "job_type": "rag_ingest",
@@ -983,8 +990,8 @@ class InMemoryRepository:
             "result": {
                 "source": payload["source"],
                 "matched_problem_count": len(matched),
-                "ingested_count": len(to_ingest),
-                "qdrant_status": "local_metadata_indexed",
+                "ingested_count": ingested_count,
+                "qdrant_status": qdrant_status,
             },
             "error_message": None,
         }
@@ -993,7 +1000,7 @@ class InMemoryRepository:
             "job_id": job_id,
             "status": "succeeded",
             "matched_problem_count": len(matched),
-            "ingested_count": len(to_ingest),
+            "ingested_count": ingested_count,
         }
 
     async def job_detail(self, user: User, job_id: str) -> JsonDict:

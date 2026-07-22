@@ -2451,7 +2451,9 @@ class PostgresIdentityProblemRepository:
             "duration_seconds": row["duration_seconds"],
         }
 
-    async def create_rag_ingest_job(self, user: User, payload: dict[str, Any]) -> JsonDict:
+    async def create_rag_ingest_job(
+        self, user: User, payload: dict[str, Any], rag_indexer: Any | None = None
+    ) -> JsonDict:
         async with self._connection(user.tenant_id, user.role, user.user_id) as connection:
             matched = await connection.fetchval(
                 """
@@ -2464,6 +2466,38 @@ class PostgresIdentityProblemRepository:
                 user.tenant_id,
                 payload["grade_levels"],
             )
+            rows = await connection.fetch(
+                """
+                SELECT id, problem_type, grade_level, difficulty, problem_text, reference_answer, tags
+                FROM problems
+                WHERE tenant_id = $1
+                  AND NOT is_deleted
+                  AND (cardinality($2::int[]) = 0 OR grade_level = ANY($2::int[]))
+                  AND ($3::boolean OR embedding_status <> 'done')
+                ORDER BY created_at, id
+                LIMIT $4
+                """,
+                user.tenant_id,
+                payload["grade_levels"],
+                payload["force_reingest"],
+                payload["batch_size"],
+            )
+            problems = [
+                {
+                    "problem_id": str(row["id"]),
+                    "problem_type": row["problem_type"],
+                    "grade_level": row["grade_level"],
+                    "difficulty": row["difficulty"],
+                    "problem_text": row["problem_text"],
+                    "reference_answer": row["reference_answer"],
+                    "tags": list(row["tags"] or []),
+                }
+                for row in rows
+            ]
+            qdrant_status = "local_metadata_indexed"
+            if rag_indexer is not None:
+                await rag_indexer.upsert_problems(user.tenant_id, problems)
+                qdrant_status = "qdrant_indexed"
             updated = await connection.fetchval(
                 """
                 WITH updated AS (
@@ -2472,21 +2506,19 @@ class PostgresIdentityProblemRepository:
                         embedding_status = 'done'
                     WHERE tenant_id = $1
                       AND NOT is_deleted
-                      AND (cardinality($2::int[]) = 0 OR grade_level = ANY($2::int[]))
-                      AND ($3::boolean OR embedding_status <> 'done')
+                      AND id = ANY($2::uuid[])
                     RETURNING 1
                 )
                 SELECT COUNT(*) FROM updated
                 """,
                 user.tenant_id,
-                payload["grade_levels"],
-                payload["force_reingest"],
+                [problem["problem_id"] for problem in problems],
             )
             result = {
                 "source": payload["source"],
                 "matched_problem_count": int(matched or 0),
                 "ingested_count": int(updated or 0),
-                "qdrant_status": "local_metadata_indexed",
+                "qdrant_status": qdrant_status,
             }
             job = await connection.fetchrow(
                 """

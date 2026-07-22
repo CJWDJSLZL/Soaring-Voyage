@@ -35,6 +35,15 @@ def fake_pool(connection: Any) -> Any:
     return pool
 
 
+class FakeRagIndexer:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[dict[str, Any]]]] = []
+
+    async def upsert_problems(self, tenant_id: str, problems: list[dict[str, Any]]) -> int:
+        self.calls.append((tenant_id, problems))
+        return len(problems)
+
+
 def user_row(**overrides: Any) -> dict[str, Any]:
     row = {
         "id": UUID(USER_ID),
@@ -644,23 +653,44 @@ async def test_update_user_status_rejects_self_suspend() -> None:
 async def test_rag_ingest_job_marks_matching_problems_indexed() -> None:
     connection = AsyncMock()
     job_id = UUID("99999999-9999-4999-8999-999999999999")
+    problem_id = UUID("88888888-8888-4888-8888-888888888888")
     connection.fetchval.side_effect = [12, 7]
+    connection.fetch.return_value = [
+        {
+            "id": problem_id,
+            "problem_type": "arithmetic",
+            "grade_level": 3,
+            "difficulty": "medium",
+            "problem_text": "1 + 1 = ___",
+            "reference_answer": "2",
+            "tags": ["加法"],
+        }
+    ]
     connection.fetchrow.return_value = {"id": job_id, "status": "succeeded"}
     repository = PostgresIdentityProblemRepository(fake_pool(connection), TENANT)
     sysadmin = PostgresIdentityProblemRepository.user_from_row(user_row(role="sysadmin"))
+    rag_indexer = FakeRagIndexer()
 
     result = await repository.create_rag_ingest_job(
         sysadmin,
         {"source": "problems_table", "grade_levels": [3], "batch_size": 100, "force_reingest": False},
+        rag_indexer,
     )
 
     assert result["job_id"] == str(job_id)
     assert result["status"] == "succeeded"
     assert result["matched_problem_count"] == 12
     assert result["ingested_count"] == 7
+    assert connection.fetch.await_args.args[3] is False
+    assert connection.fetch.await_args.args[4] == 100
+    assert rag_indexer.calls[0][0] == TENANT
+    assert rag_indexer.calls[0][1][0]["problem_id"] == str(problem_id)
     update_sql = connection.fetchval.await_args_list[1].args[0]
     assert "embedding_status = 'done'" in update_sql
-    assert "$3::boolean OR embedding_status <> 'done'" in update_sql
+    assert "id = ANY($2::uuid[])" in update_sql
+    assert connection.fetchval.await_args_list[1].args[2] == [str(problem_id)]
     sql = connection.fetchrow.await_args.args[0]
+    result_json = connection.fetchrow.await_args.args[3]
     assert "'rag_ingest', 'succeeded'" in sql
     assert "error_message" not in sql
+    assert '"qdrant_status": "qdrant_indexed"' in result_json

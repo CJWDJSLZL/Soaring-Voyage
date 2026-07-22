@@ -36,6 +36,16 @@ class FakeRedis:
         self.closed = True
 
 
+class FakeRagIndexer:
+    status = "qdrant-configured"
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+
+
 def test_memory_lifecycle_keeps_single_store_as_identity_repository() -> None:
     configured = Settings(app_env="test", persistence_backend="memory")
     test_app = create_app(configured)
@@ -125,12 +135,14 @@ def test_production_lifecycle_uses_external_adapters_without_memory_store() -> N
     pool.acquire.return_value = AsyncContext(connection)
     pool.close = AsyncMock()
     fake_redis = FakeRedis()
+    fake_rag = FakeRagIndexer()
     configured = Settings(
         app_env="production",
         persistence_backend="postgres",
         database_url="postgresql:///app",
         default_tenant_id=TENANT,
         redis_url="redis://localhost:6379/0",
+        qdrant_url="http://qdrant:6333",
         jwt_secret="x" * 40,
         allowed_origins=("https://school.example",),
         allowed_hosts=("api.school.example",),
@@ -141,6 +153,7 @@ def test_production_lifecycle_uses_external_adapters_without_memory_store() -> N
         configured,
         pool_factory=AsyncMock(return_value=pool),
         redis_factory=MagicMock(return_value=fake_redis),
+        qdrant_indexer_factory=MagicMock(return_value=fake_rag),
     )
 
     with TestClient(test_app) as client:
@@ -154,9 +167,10 @@ def test_production_lifecycle_uses_external_adapters_without_memory_store() -> N
     assert body["environment"] == "production"
     assert body["services"]["database"] == "ok"
     assert body["services"]["redis"] == "ok"
-    assert body["services"]["qdrant"] == "local-metadata-index"
+    assert body["services"]["qdrant"] == "qdrant-configured"
     pool.close.assert_awaited_once_with()
     assert fake_redis.closed is True
+    assert fake_rag.closed is True
 
 
 def test_postgres_health_reports_failed_ping() -> None:

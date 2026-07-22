@@ -1124,7 +1124,9 @@ async def rag_ingest(
     user: User = Depends(require_roles("sysadmin")),
     repository: IdentityProblemRepository = Depends(get_identity_repository),
 ):
-    return envelope(request, await repository.create_rag_ingest_job(user, payload.model_dump()))
+    return envelope(
+        request, await repository.create_rag_ingest_job(user, payload.model_dump(), request.app.state.rag_indexer)
+    )
 
 
 @router.get("/ops/jobs/{job_id}")
